@@ -149,13 +149,17 @@ def write_atomic(path, text):
 
 
 class FakeProc(threading.Thread):
-    """Counters advance at fixed rates: 30% CPU, 1000 B/s upload, 2000 B/s download."""
+    """Counters follow elapsed time: 30% CPU, 1000 B/s upload, 2000 B/s download.
+
+    Values are derived from the clock rather than counted per tick, so a slow test host
+    only makes the files staler, never the long-run rates wrong.
+    """
 
     def __init__(self, root):
         super().__init__(daemon=True)
         self.root = root
         self.stopped = threading.Event()
-        self.tick = 0
+        self.start_time = time.monotonic()
         os.makedirs(os.path.join(root, "net"))
         write_atomic(os.path.join(root, "meminfo"),
                      "MemTotal: 4000000 kB\nMemAvailable: 3000000 kB\nSwapTotal: 2000000 kB\nSwapFree: 1500000 kB\n")
@@ -163,17 +167,17 @@ class FakeProc(threading.Thread):
         self.write()
 
     def write(self):
-        t = self.tick
-        user, idle = 1000 + 30 * t, 5000 + 70 * t
+        elapsed = time.monotonic() - self.start_time
+        ticks = int(elapsed * 100)
+        user, idle = 1000 + 30 * ticks, 5000 + 70 * ticks
         write_atomic(os.path.join(self.root, "stat"),
                      "cpu  %d 0 0 %d 0 0 0 0 0 0\ncpu0 %d 0 0 %d 0 0 0 0 0 0\nintr 1\n" % (user, idle, user, idle))
         write_atomic(os.path.join(self.root, "net", "dev"),
                      "Inter-| Receive | Transmit\n face |bytes packets|bytes packets\n"
-                     "%s: %d 0 0 0 0 0 0 0 %d 0 0 0 0 0 0 0\n" % (IFACE.rjust(6), 500 * t, 250 * t))
+                     "%s: %d 0 0 0 0 0 0 0 %d 0 0 0 0 0 0 0\n" % (IFACE.rjust(6), int(2000 * elapsed), int(1000 * elapsed)))
 
     def run(self):
-        while not self.stopped.wait(0.25):
-            self.tick += 1
+        while not self.stopped.wait(0.1):
             self.write()
 
 
@@ -280,8 +284,8 @@ def main():
         if FIXTURE:
             assert abs(m["cpu_percent"] - 30.0) < 0.01, m
             assert abs(m["memory_percent"] - 25.0) < 0.01 and abs(m["swap_percent"] - 25.0) < 0.01, m
-            assert 800 <= m["network_tx_bytes_per_second"] <= 1200, m
-            assert 1600 <= m["network_rx_bytes_per_second"] <= 2400, m
+            assert 600 <= m["network_tx_bytes_per_second"] <= 1400, m
+            assert 1200 <= m["network_rx_bytes_per_second"] <= 2800, m
         else:
             for k in ("cpu_percent", "memory_percent", "disk_percent"):
                 assert m[k] is not None and 0 <= m[k] <= 100, m

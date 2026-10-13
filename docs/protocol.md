@@ -75,6 +75,7 @@ Content-Type: application/json
 - **No extra fields.** Unknown fields are rejected, and the body must be under 8 KiB.
 - **Duration.** `sample_duration_ms` must be within 0.5–1.5× the interval and at most 3,600,000.
 - **Observation time.** `observed_at` must be no more than five minutes old and no more than two minutes in the future.
+- **Agent identity.** `agent.os` is `linux`, `darwin` or `windows`, and `agent.arch` is `amd64` or `arm64`. The dashboard uses them to show the server platform.
 - **Session.** `boot_id` identifies an agent session. It is a random UUID kept in the state directory, not the kernel boot ID.
 - **Sequence numbers.** Within a session, `sequence` increases strictly and never exceeds 2⁵³−1. The agent reserves blocks of 256 numbers with an atomic, fsynced state write. After a restart it skips the rest of the reserved block, so a number is never reused. Gaps are expected.
 
@@ -83,7 +84,7 @@ Content-Type: application/json
 | Status | Agent behaviour |
 | --- | --- |
 | 202 | Accepted (or an exact duplicate). Continue at the normal cadence. |
-| 401 | Stop sending and wait for a key reload (`SIGHUP`). At startup, exit with code 77. |
+| 401 | Stop sending and wait for a key reload (`SIGHUP`, or `paramchange` on Windows). At startup, exit with code 77. |
 | 403 | The monitor is paused or not provisioned. Refresh configuration and back off. |
 | 409 | Configuration version or session conflict. Refetch configuration once. If the version is unchanged, back off for at least the offline lease. The boot ID is never regenerated. |
 | 413 / 422 | Drop the report and log the reason, including clock skew taken from the `Date` header. Back off after repeated rejections. |

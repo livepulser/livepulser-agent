@@ -106,22 +106,35 @@ int lp_state_open(struct lp_state *s, const char *dir, const char *monitor_id, c
 			goto fail;
 		}
 	}
-	if (loaded != 1) {
-		s->new_session = true;
-		s->reserved_through = 0;
-		if (lp_uuid4(s->boot_id) != 0) {
-			snprintf(err, errlen, "cannot read system randomness");
-			goto fail;
-		}
-		if (write_state(s, 0, err, errlen) != 0)
-			goto fail;
-	}
+	if (loaded != 1 && lp_state_new_session(s, err, errlen) != 0)
+		goto fail;
 	/* Numbers reserved by a previous run may have been sent; never reuse them. */
 	s->next_sequence = s->reserved_through + 1;
 	return LP_STATE_OK;
 fail:
 	lp_state_close(s);
 	return LP_STATE_ERROR;
+}
+
+int lp_state_new_session(struct lp_state *s, char *err, size_t errlen)
+{
+	char previous[LP_UUID_LEN + 1];
+	int64_t reserved = s->reserved_through;
+
+	memcpy(previous, s->boot_id, sizeof previous);
+	if (lp_uuid4(s->boot_id) != 0) {
+		snprintf(err, errlen, "cannot read system randomness");
+		memcpy(s->boot_id, previous, sizeof previous);
+		return -1;
+	}
+	if (write_state(s, 0, err, errlen) != 0) {
+		memcpy(s->boot_id, previous, sizeof previous);
+		s->reserved_through = reserved;
+		return -1;
+	}
+	s->new_session = true;
+	s->next_sequence = 1;
+	return 0;
 }
 
 int lp_state_take_sequence(struct lp_state *s, int64_t *seq, char *err, size_t errlen)

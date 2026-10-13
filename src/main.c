@@ -42,6 +42,8 @@ struct agent {
 	bool auth_failed;
 	bool conflict_check;
 	int64_t conflict_version;
+	int64_t conflict_since_ms;
+	bool session_renewed;
 	bool reported_once;
 
 	bool pending;
@@ -84,11 +86,26 @@ static void resolve_conflict(struct agent *a, const struct lp_config *c, int64_t
 	if (!a->conflict_check)
 		return;
 	a->conflict_check = false;
-	if (c->config_version == a->conflict_version) {
-		a->send_failures++;
-		a->send_after_ms = now + max64(lp_backoff_ms(a->send_failures), lp_seconds(c->offline_after_s));
-		lp_log(LP_WARN, "telemetry conflict with unchanged configuration; another agent may be using this monitor");
+	if (c->config_version != a->conflict_version)
+		return;
+	/*
+	 * A conflict that outlasts the offline lease means the server retired this session (another
+	 * agent took over and stopped) or holds a newer sequence. Start one new session per process so
+	 * two hosts sharing a key cannot keep displacing each other.
+	 */
+	if (!a->session_renewed && now - a->conflict_since_ms >= lp_seconds(c->offline_after_s) + (int64_t)c->interval_s * 1000) {
+		char err[160];
+		if (lp_state_new_session(&a->state, err, sizeof err) == 0) {
+			a->session_renewed = true;
+			lp_log(LP_WARN, "the server no longer accepts this agent session; starting a new session");
+			return;
+		}
+		lp_log(LP_ERR, "%s", err);
 	}
+	a->send_failures++;
+	a->send_after_ms = now + max64(lp_backoff_ms(a->send_failures), lp_seconds(c->offline_after_s));
+	lp_log(LP_WARN, a->session_renewed ? "telemetry conflict persists after starting a new session; check that no other agent uses this monitor"
+					   : "telemetry conflict with unchanged configuration; another agent may be using this monitor");
 }
 
 static void apply_config(struct agent *a, const struct lp_config *c, const char *etag, int64_t now)
@@ -214,6 +231,7 @@ static void handle_telemetry(struct agent *a, const struct lp_response *r, bool 
 		a->reported_once = true;
 		a->send_failures = 0;
 		a->rejections = 0;
+		a->conflict_since_ms = 0;
 		return;
 	case 401:
 		lp_log(LP_ERR, "API key was rejected; replace the key file, then reload or restart the agent");
@@ -227,6 +245,8 @@ static void handle_telemetry(struct agent *a, const struct lp_response *r, bool 
 		return;
 	case 409:
 		lp_log(LP_INFO, "telemetry conflict; refreshing configuration");
+		if (!a->conflict_since_ms)
+			a->conflict_since_ms = now;
 		if (!a->conflict_check) {
 			a->conflict_check = true;
 			a->conflict_version = a->cfg.config_version;

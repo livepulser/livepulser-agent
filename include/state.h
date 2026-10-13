@@ -25,6 +25,8 @@ struct lp_state {
 };
 
 int lp_state_open(struct lp_state *s, const char *dir, const char *monitor_id, const char *endpoint, char *err, size_t errlen);
+/* Abandons the current session for a fresh boot ID, e.g. after the server retired it. */
+int lp_state_new_session(struct lp_state *s, char *err, size_t errlen);
 int lp_state_take_sequence(struct lp_state *s, int64_t *seq, char *err, size_t errlen);
 void lp_state_close(struct lp_state *s);
 

@@ -13,7 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Network interface selection: the dashboard setting wins. Otherwise the primary IPv4 or IPv6 default route is used, and an ambiguous choice is reported as unavailable.
 - Protocol version 1 client. Configuration is cached with an ETag, and each report carries all six metrics, with explicit `null` values for unavailable readings.
 - HTTPS transport using libcurl on Linux and macOS and WinHTTP on Windows. Redirects and system proxies are never followed implicitly.
-- Session state with atomic, flushed sequence reservations in blocks of 256, guarded by an exclusive lock.
+- Session state with atomic, flushed sequence reservations in blocks of 256, guarded by an exclusive lock. A session the server has retired is replaced once per process after the conflict outlasts the offline lease.
 - Response handling for each status code:
   - backoff with jitter for errors;
   - `Retry-After` honoured on 429;

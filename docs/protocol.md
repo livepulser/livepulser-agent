@@ -101,4 +101,9 @@ Content-Type: application/json
 
 ## Session ownership
 
-Only one session can own a monitor. When the local state is lost, the agent starts a new session. The server accepts a new session only after the old one has been silent for `offline_after_seconds`, which is 3×interval + 30 s. If the state file is corrupt, the agent waits that long before its first report.
+Only one session can own a monitor. The server accepts a new session only after the old one has been silent for `offline_after_seconds` (3×interval + 30 s). When it accepts a new session, it retires the previous boot ID for 24 hours.
+
+The agent handles ownership as follows:
+
+- **Lost local state.** The agent starts a new session. If the state file was corrupt, it waits for the lease before its first report.
+- **Retired session.** This happens when another agent took the monitor over and then stopped, for example when an installation moved between hosts and back. The agent sees a 409 that persists, with unchanged configuration, for longer than the lease plus one interval. It then starts one new session. It does this at most once per process, so two hosts that share a key cannot keep displacing each other. If the conflict continues, the agent backs off and logs that another agent may be using the monitor.

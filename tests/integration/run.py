@@ -209,8 +209,12 @@ def wait_for(predicate, timeout, what):
     raise AssertionError("timed out waiting for " + what)
 
 
+LAST_AGENT = []
+
+
 class Agent:
     def __init__(self, work, conf, *args):
+        LAST_AGENT.append(self)
         self.log_path = os.path.join(work, "agent-%d.log" % time.monotonic_ns())
         env = dict(os.environ, LP_TEST_TIME_DIVISOR="60", ASAN_OPTIONS="detect_leaks=%d" % FIXTURE,
                    https_proxy="http://127.0.0.1:9", http_proxy="http://127.0.0.1:9")
@@ -429,4 +433,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        if LAST_AGENT:
+            with open(LAST_AGENT[-1].log_path) as f:
+                sys.stderr.write("--- agent log ---\n" + f.read()[-6000:] + "\n")
+        statuses = [(r["kind"], r["status"], round(r["time"], 2), r["body"]["trigger"] if r["body"] else None) for r in API.log[-30:]]
+        sys.stderr.write("--- last requests ---\n%s\n" % statuses)
+        raise

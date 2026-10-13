@@ -28,7 +28,6 @@ void lp_clock_now(struct lp_clock *t);
 int64_t lp_mono_ms(void);
 bool lp_gmtime(int64_t unix_s, struct tm *out);
 
-/* Stop and reload requests arrive from signals, console events or the service manager. */
 int lp_events_init(void);
 void lp_wait_until(int64_t deadline_ms);
 bool lp_stop_requested(void);

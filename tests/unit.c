@@ -404,6 +404,13 @@ static void test_state(const char *dir)
 	CHECK(lp_state_open(&s, dir, monitor, "https://rs.livepulser.com", err, sizeof err) == LP_STATE_OK);
 	CHECK(!s.new_session && strcmp(s.boot_id, boot) == 0);
 	CHECK(lp_state_take_sequence(&s, &seq, err, sizeof err) == 0 && seq == 2 * LP_STATE_BLOCK + 1);
+	CHECK(lp_state_new_session(&s, err, sizeof err) == 0);
+	CHECK(strcmp(s.boot_id, boot) != 0 && s.next_sequence == 1);
+	CHECK(lp_state_take_sequence(&s, &seq, err, sizeof err) == 0 && seq == 1);
+	memcpy(boot, s.boot_id, sizeof boot);
+	lp_state_close(&s);
+	CHECK(lp_state_open(&s, dir, monitor, "https://rs.livepulser.com", err, sizeof err) == LP_STATE_OK);
+	CHECK(!s.new_session && strcmp(s.boot_id, boot) == 0 && s.next_sequence == LP_STATE_BLOCK + 1);
 	lp_state_close(&s);
 
 	CHECK(lp_state_open(&s, dir, "11111111-2222-4333-8444-555555555555", "https://rs.livepulser.com", err, sizeof err) == LP_STATE_OK);

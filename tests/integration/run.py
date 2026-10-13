@@ -19,6 +19,7 @@ MONITOR = "6f1c2e9a-4b7d-4c3e-8a5f-0d2b9e7c1a34"
 KEY = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6"
 OTHER_KEY = "Zbcdefghijklmnopqrstuvwxyz0123456789ABCDE_-"
 INTERVAL = 2
+LEASE = 3
 SYSTEM = platform.system()
 FIXTURE = SYSTEM == "Linux"
 IFACE = {"Linux": "lo", "Darwin": "lo0", "Windows": "Loopback Pseudo-Interface 1"}[SYSTEM]
@@ -38,6 +39,7 @@ class Api:
         self.boot = None
         self.seq = 0
         self.last = 0.0
+        self.retired = set()
 
     def config(self):
         body = json.dumps({
@@ -127,9 +129,14 @@ class Handler(BaseHTTPRequestHandler):
                 status = 202
             elif API.boot == report["boot_id"] and report["sequence"] < API.seq:
                 status = 409
+            elif API.boot not in (None, report["boot_id"]) and (
+                    report["boot_id"] in API.retired or time.monotonic() - API.last < LEASE):
+                status = 409
             elif time.monotonic() - API.last < INTERVAL * 0.8:
                 status = 429
             if status == 202:
+                if API.boot not in (None, report["boot_id"]):
+                    API.retired.add(API.boot)
                 API.boot, API.seq, API.last = report["boot_id"], report["sequence"], time.monotonic()
             self.record("telemetry", status, report)
             self.reply(status, headers={"Retry-After": "60"} if status == 429 else None)
@@ -344,6 +351,24 @@ def main():
     assert resumed["boot_id"] == boot and resumed["sequence"] > max(last_seq, 256), resumed
     assert agent.stop() == 0
     print("ok   restart keeps the session and abandons reserved sequence numbers")
+
+    other_state = os.path.join(work, "state-other")
+    os.mkdir(other_state, 0o700)
+    other_conf = os.path.join(work, "agent-other.conf")
+    with open(conf) as f:
+        write_atomic(other_conf, f.read().replace(state, other_state))
+    count = len(accepted())
+    other = Agent(work, other_conf)
+    wait_for(lambda: any(r["body"]["boot_id"] != boot for r in accepted()[count:]), 40, "another host to take over")
+    assert other.stop() == 0
+    count = len(accepted())
+    agent = Agent(work, conf)
+    wait_for(lambda: len(accepted()) > count, 40, "the original host to start a new session")
+    renewed = accepted()[-1]["body"]
+    assert agent.stop() == 0
+    assert renewed["boot_id"] not in API.retired and renewed["boot_id"] != boot and renewed["sequence"] == 1, renewed
+    assert "starting a new session" in agent.output()
+    print("ok   a session retired by another host is replaced once")
 
     with API.lock:
         API.schema = 2

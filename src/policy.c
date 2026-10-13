@@ -44,6 +44,9 @@ enum lp_window_status lp_window_check(int interval_s, const struct lp_clock *sta
 
 	if (min < 1000)
 		min = 1000;
+	/* A slow upload delays the next measurement; keep the sample rather than lose it. */
+	if (max < (int64_t)interval_s * 1000 + 15000)
+		max = (int64_t)interval_s * 1000 + 15000;
 	if (max > 3600000)
 		max = 3600000;
 	*duration_ms = d;

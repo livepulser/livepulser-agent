@@ -82,7 +82,7 @@ The selection is rechecked every five minutes and whenever the configuration cha
 
 A whole window is discarded, and a fresh baseline taken, in any of these cases:
 
-- its length is outside 0.5×–1.5× the sample interval;
+- it is shorter than half the sample interval, or longer than 1.5× the sample interval plus a 15-second allowance for slow uploads;
 - the host slept during it;
 - the wall clock jumped by more than five seconds relative to the monotonic clock;
 - the sample interval, disk path, interface or paused state changed.

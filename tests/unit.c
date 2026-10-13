@@ -517,6 +517,10 @@ static void test_policy(void)
 	CHECK(lp_window_check(60, &a, &b, &d) == LP_WINDOW_TOO_SHORT);
 	b = (struct lp_clock){100000, 100000, a.real_ms + 99000};
 	CHECK(lp_window_check(60, &a, &b, &d) == LP_WINDOW_TOO_LONG);
+	b = (struct lp_clock){1000 + 24000, 1000 + 24000, a.real_ms + 24000};
+	CHECK(lp_window_check(10, &a, &b, &d) == LP_WINDOW_OK && d == 24000);
+	b = (struct lp_clock){1000 + 26000, 1000 + 26000, a.real_ms + 26000};
+	CHECK(lp_window_check(10, &a, &b, &d) == LP_WINDOW_TOO_LONG);
 	b = (struct lp_clock){61000, 361000, a.real_ms + 360000};
 	CHECK(lp_window_check(60, &a, &b, &d) == LP_WINDOW_SUSPENDED);
 	b = (struct lp_clock){61000, 61000, a.real_ms + 3660000};

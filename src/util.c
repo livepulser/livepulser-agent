@@ -2,10 +2,8 @@
 
 #include <ctype.h>
 #include <stdio.h>
-#include <unistd.h>
-#if defined(__APPLE__)
-#include <sys/random.h>
-#endif
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef LP_TESTING
 int64_t lp_time_divisor = 1;
@@ -17,20 +15,6 @@ void lp_wipe(void *p, size_t n)
 
 	while (n--)
 		*b++ = 0;
-}
-
-int lp_random_bytes(void *buf, size_t n)
-{
-	unsigned char *p = buf;
-
-	while (n > 0) {
-		size_t chunk = n > 256 ? 256 : n;
-		if (getentropy(p, chunk) != 0)
-			return -1;
-		p += chunk;
-		n -= chunk;
-	}
-	return 0;
 }
 
 int64_t lp_jitter_ms(int64_t max_ms)
@@ -65,4 +49,54 @@ bool lp_valid_uuid(const char *s)
 			return false;
 	}
 	return s[LP_UUID_LEN] == '\0';
+}
+
+static int64_t days_from_civil(int64_t y, int m, int d)
+{
+	y -= m <= 2;
+	int64_t era = (y >= 0 ? y : y - 399) / 400;
+	int64_t yoe = y - era * 400;
+	int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+	int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + doe - 719468;
+}
+
+/* Parses the IMF-fixdate form required by RFC 9110, e.g. "Sun, 06 Nov 1994 08:49:37 GMT". */
+int64_t lp_parse_http_date(const char *s)
+{
+	static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+	char mon[4] = "";
+	int day, year, h, mi, sec, n = 0;
+	const char *found;
+
+	if (sscanf(s, "%*3s, %2d %3s %4d %2d:%2d:%2d GMT%n", &day, mon, &year, &h, &mi, &sec, &n) != 6 || s[n] != '\0')
+		return -1;
+	found = strlen(mon) == 3 ? strstr(months, mon) : NULL;
+	if (!found || (found - months) % 3 != 0 || day < 1 || day > 31 || year < 1970 || h > 23 || mi > 59 || sec > 60)
+		return -1;
+	return days_from_civil(year, (int)((found - months) / 3) + 1, day) * 86400 + h * 3600 + mi * 60 + sec;
+}
+
+int64_t lp_parse_retry_after(const char *value, int64_t now_unix)
+{
+	char *end;
+	long long secs;
+	int64_t when;
+
+	while (*value == ' ')
+		value++;
+	if (*value >= '0' && *value <= '9') {
+		secs = strtoll(value, &end, 10);
+		while (*end == ' ')
+			end++;
+		if (*end)
+			return -1;
+		return secs > 86400 ? 86400 : secs;
+	}
+	when = lp_parse_http_date(value);
+	if (when < 0)
+		return -1;
+	if (when <= now_unix)
+		return 0;
+	return when - now_unix > 86400 ? 86400 : when - now_unix;
 }

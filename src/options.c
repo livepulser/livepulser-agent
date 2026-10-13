@@ -1,13 +1,11 @@
 #include "options.h"
 
 #include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+
+#include "platform.h"
 
 #define MAX_OPTIONS_BYTES 16384
 
@@ -62,7 +60,7 @@ static int set_endpoint(struct lp_options *o, char *value, char *err, size_t err
 
 static int set_path(char *dst, size_t cap, const char *key, const char *value, char *err, size_t errlen)
 {
-	if (value[0] != '/' || strlen(value) >= cap) {
+	if (!lp_path_is_absolute(value) || strlen(value) >= cap) {
 		snprintf(err, errlen, "%s must be an absolute path", key);
 		return -1;
 	}
@@ -88,8 +86,14 @@ static int set_option(struct lp_options *o, const char *key, char *value, char *
 		return set_path(o->api_key_file, sizeof o->api_key_file, key, value, err, errlen);
 	if (strcmp(key, "state_dir") == 0)
 		return set_path(o->state_dir, sizeof o->state_dir, key, value, err, errlen);
-	if (strcmp(key, "ca_file") == 0)
+	if (strcmp(key, "ca_file") == 0) {
+#ifdef _WIN32
+		snprintf(err, errlen, "ca_file is not supported on Windows; add the CA to the Windows certificate store");
+		return -1;
+#else
 		return set_path(o->ca_file, sizeof o->ca_file, key, value, err, errlen);
+#endif
+	}
 	if (strcmp(key, "proxy") == 0) {
 		if (strlen(value) >= sizeof o->proxy || strpbrk(value, " \t")) {
 			snprintf(err, errlen, "invalid proxy");
@@ -111,6 +115,10 @@ int lp_options_parse(const char *text, size_t len, struct lp_options *o, char *e
 	int lineno = 0;
 
 	memset(o, 0, sizeof *o);
+	if (len >= 3 && memcmp(text, "\xEF\xBB\xBF", 3) == 0) {
+		text += 3;
+		len -= 3;
+	}
 	if (memchr(text, '\0', len)) {
 		snprintf(err, errlen, "configuration contains a NUL byte");
 		return -1;
@@ -160,34 +168,18 @@ int lp_options_load(const char *path, struct lp_options *o, char *err, size_t er
 {
 	char text[MAX_OPTIONS_BYTES + 1];
 	const char *env;
-	ssize_t n;
-	struct stat st;
-	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY);
+	size_t len;
 
-	if (fd < 0) {
-		snprintf(err, errlen, "cannot open %s: %s", path, strerror(errno));
-		return -1;
-	}
-	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > MAX_OPTIONS_BYTES) {
-		snprintf(err, errlen, "%s is not a regular file under %d bytes", path, MAX_OPTIONS_BYTES);
-		close(fd);
-		return -1;
-	}
-	n = read(fd, text, MAX_OPTIONS_BYTES);
-	close(fd);
-	if (n < 0) {
-		snprintf(err, errlen, "cannot read %s: %s", path, strerror(errno));
-		return -1;
-	}
-	if (lp_options_parse(text, (size_t)n, o, err, errlen) != 0)
+	if (lp_read_config_file(path, text, sizeof text, &len, err, errlen) != 0 ||
+	    lp_options_parse(text, len, o, err, errlen) != 0)
 		return -1;
 
-	if (!o->api_key_file[0] && (env = getenv("CREDENTIALS_DIRECTORY")) && *env == '/')
+	if (!o->api_key_file[0] && (env = getenv("CREDENTIALS_DIRECTORY")) && lp_path_is_absolute(env))
 		snprintf(o->api_key_file, sizeof o->api_key_file, "%s/api-key", env);
-	if (!o->state_dir[0] && (env = getenv("STATE_DIRECTORY")) && *env == '/')
+	if (!o->state_dir[0] && (env = getenv("STATE_DIRECTORY")) && lp_path_is_absolute(env))
 		snprintf(o->state_dir, sizeof o->state_dir, "%.*s", (int)strcspn(env, ":"), env);
 	if (!o->state_dir[0])
-		snprintf(o->state_dir, sizeof o->state_dir, "%s", LP_DEFAULT_STATE_DIR);
+		snprintf(o->state_dir, sizeof o->state_dir, "%s", lp_default_state_dir());
 
 	if (!o->endpoint[0] || !o->monitor_id[0] || !o->api_key_file[0]) {
 		snprintf(err, errlen, "%s must set endpoint, monitor_id and api_key_file", path);
@@ -199,32 +191,15 @@ int lp_options_load(const char *path, struct lp_options *o, char *err, size_t er
 int lp_api_key_load(const char *path, char key[LP_API_KEY_LEN + 1], char *err, size_t errlen)
 {
 	char buf[257];
-	char *start, *end;
-	struct stat st;
-	ssize_t n;
-	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY), rc = -1;
+	char *start;
+	size_t len;
+	int rc = -1;
 
-	if (fd < 0) {
-		snprintf(err, errlen, "cannot open API key file %s: %s", path, strerror(errno));
-		return -1;
-	}
-	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > 256) {
-		snprintf(err, errlen, "API key file %s must be a small regular file", path);
+	if (lp_read_secret_file(path, buf, sizeof buf, &len, err, errlen) != 0)
 		goto out;
-	}
-	if (st.st_mode & (S_IRWXO | S_IWGRP)) {
-		snprintf(err, errlen, "API key file %s must not be accessible by other users (chmod 0600 or 0640)", path);
-		goto out;
-	}
-	n = read(fd, buf, sizeof buf - 1);
-	if (n < 0) {
-		snprintf(err, errlen, "cannot read API key file %s: %s", path, strerror(errno));
-		goto out;
-	}
-	buf[n] = '\0';
 	start = trim(buf);
-	end = start + strlen(start);
-	if (end - start != LP_API_KEY_LEN || strspn(start, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != LP_API_KEY_LEN) {
+	if (strlen(start) != LP_API_KEY_LEN ||
+	    strspn(start, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != LP_API_KEY_LEN) {
 		snprintf(err, errlen, "API key file %s does not contain a valid resource API key", path);
 		goto out;
 	}
@@ -233,6 +208,5 @@ int lp_api_key_load(const char *path, char key[LP_API_KEY_LEN + 1], char *err, s
 	rc = 0;
 out:
 	lp_wipe(buf, sizeof buf);
-	close(fd);
 	return rc;
 }

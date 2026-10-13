@@ -1,25 +1,20 @@
 #include <errno.h>
-#include <fcntl.h>
 #include <getopt.h>
-#include <limits.h>
-#include <poll.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "agent.h"
 #include "collector.h"
 #include "config.h"
 #include "log.h"
 #include "options.h"
+#include "platform.h"
 #include "policy.h"
 #include "protocol.h"
+#include "service.h"
 #include "state.h"
 #include "transport.h"
-
-#define NEVER INT64_MAX
 
 struct agent {
 	struct lp_options opt;
@@ -55,59 +50,6 @@ struct agent {
 	char body[2048];
 	size_t body_len;
 };
-
-static volatile sig_atomic_t stop_requested;
-static volatile sig_atomic_t reload_requested;
-static int wake_pipe[2] = {-1, -1};
-
-static void on_signal(int sig)
-{
-	int saved = errno;
-
-	if (sig == SIGHUP)
-		reload_requested = 1;
-	else
-		stop_requested = 1;
-	if (wake_pipe[1] >= 0 && write(wake_pipe[1], "x", 1) < 0) {
-		/* The pipe is non-blocking; a full pipe already guarantees a wakeup. */
-	}
-	errno = saved;
-}
-
-static int setup_signals(void)
-{
-	struct sigaction sa;
-
-	if (pipe(wake_pipe) != 0)
-		return -1;
-	for (int i = 0; i < 2; i++) {
-		if (fcntl(wake_pipe[i], F_SETFL, O_NONBLOCK) != 0 || fcntl(wake_pipe[i], F_SETFD, FD_CLOEXEC) != 0)
-			return -1;
-	}
-	memset(&sa, 0, sizeof sa);
-	sa.sa_handler = on_signal;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(SIGTERM, &sa, NULL) || sigaction(SIGINT, &sa, NULL) || sigaction(SIGHUP, &sa, NULL))
-		return -1;
-	signal(SIGPIPE, SIG_IGN);
-	return 0;
-}
-
-static void wait_until(int64_t deadline_ms)
-{
-	struct pollfd pfd = {.fd = wake_pipe[0], .events = POLLIN};
-	int timeout = -1;
-	char drain[16];
-
-	if (deadline_ms != NEVER) {
-		int64_t left = deadline_ms - lp_mono_ms();
-		timeout = left <= 0 ? 0 : left > INT_MAX ? INT_MAX : (int)left;
-	}
-	if (poll(&pfd, 1, timeout) > 0) {
-		while (read(wake_pipe[0], drain, sizeof drain) > 0)
-			;
-	}
-}
 
 static int64_t min64(int64_t a, int64_t b)
 {
@@ -372,7 +314,7 @@ static void close_window(struct agent *a)
 	lp_collect_counters(&a->collector, &end);
 	status = lp_window_check(a->cfg.interval_s, &a->baseline.clock, &end.clock, &duration);
 	if (status == LP_WINDOW_OK)
-		lp_collect_metrics(&a->collector, &a->cfg, &a->baseline, &end, duration, &m);
+		lp_collect_metrics(&a->cfg, &a->baseline, &end, duration, &m);
 	else
 		lp_log(status == LP_WINDOW_TOO_LONG ? LP_INFO : LP_WARN, "discarding sample: %s", lp_window_status_text(status));
 
@@ -421,16 +363,15 @@ static void reload_key(struct agent *a)
 
 static int run(struct agent *a)
 {
-	while (!stop_requested) {
+	while (!lp_stop_requested()) {
 		int64_t now = lp_mono_ms(), wake;
 
-		if (reload_requested) {
-			reload_requested = 0;
+		if (lp_take_reload()) {
 			reload_key(a);
 			continue;
 		}
 		if (a->auth_failed) {
-			wait_until(NEVER);
+			lp_wait_until(LP_NEVER);
 			continue;
 		}
 		if (now >= a->next_config_ms) {
@@ -457,7 +398,7 @@ static int run(struct agent *a)
 			if (a->pending)
 				wake = min64(wake, a->retry_at_ms);
 		}
-		wait_until(wake);
+		lp_wait_until(wake);
 	}
 	lp_log(LP_INFO, "stopping");
 	return LP_EXIT_OK;
@@ -489,73 +430,60 @@ static int check(struct agent *a)
 	printf("configuration version %lld\ninterval %ds\nstatus %s\ndisk path %s\nnetwork interface %s\n",
 	       (long long)c.config_version, c.interval_s, c.active ? "active" : "paused",
 	       c.disk_path_valid ? c.disk_path : "(invalid)",
-	       c.interface_explicit ? (c.interface_valid ? c.interface : "(invalid)") : "(default route)");
+	       c.interface_explicit ? (c.interface_valid ? c.ifname : "(invalid)") : "(default route)");
 	return LP_EXIT_OK;
 }
 
 static void usage(FILE *out)
 {
 	fprintf(out,
-		"Usage: %s [--config PATH] [--check] [--verbose]\n\n"
-		"  -c, --config PATH  configuration file (default " LP_DEFAULT_CONFIG ")\n"
-		"      --check        fetch and validate the monitor configuration, then exit\n"
-		"  -v, --verbose      log debug messages\n"
-		"  -V, --version      print the version and exit\n"
-		"  -h, --help         show this help\n",
-		LP_AGENT_NAME);
+		"Usage: %s [--config PATH] [--check] [--log-file PATH] [--verbose]\n\n"
+		"  -c, --config PATH    configuration file (default %s)\n"
+		"      --check          fetch and validate the monitor configuration, then exit\n"
+		"      --log-file PATH  write logs to PATH (rotated at 1 MiB) instead of stderr\n",
+		LP_AGENT_NAME, lp_default_config_path());
+#ifdef _WIN32
+	fprintf(out, "      --service        run under the Windows service control manager\n");
+#endif
+	fprintf(out,
+		"  -v, --verbose        log debug messages\n"
+		"  -V, --version        print the version and exit\n"
+		"  -h, --help           show this help\n");
 }
 
-int main(int argc, char **argv)
-{
-	static const struct option longopts[] = {
-		{"config", required_argument, NULL, 'c'},
-		{"check", no_argument, NULL, 'k'},
-		{"verbose", no_argument, NULL, 'v'},
-		{"version", no_argument, NULL, 'V'},
-		{"help", no_argument, NULL, 'h'},
-		{NULL, 0, NULL, 0},
-	};
-	static struct agent a;
-	const char *config_path = LP_DEFAULT_CONFIG;
-	bool check_only = false, verbose = false;
-	char err[256];
-	int opt, rc;
+struct cli {
+	const char *config_path;
+	const char *log_file;
+	bool check_only;
+	bool verbose;
+	bool service;
+};
 
-	while ((opt = getopt_long(argc, argv, "c:vVh", longopts, NULL)) != -1) {
-		switch (opt) {
-		case 'c':
-			config_path = optarg;
-			break;
-		case 'k':
-			check_only = true;
-			break;
-		case 'v':
-			verbose = true;
-			break;
-		case 'V':
-			printf("%s %s\n", LP_AGENT_NAME, LP_VERSION);
-			return LP_EXIT_OK;
-		case 'h':
-			usage(stdout);
-			return LP_EXIT_OK;
-		default:
-			usage(stderr);
-			return LP_EXIT_CONFIG;
-		}
-	}
-	if (optind != argc) {
-		usage(stderr);
-		return LP_EXIT_CONFIG;
-	}
-	lp_log_init(verbose);
+static int agent_main(void *arg)
+{
+	static struct agent a;
+	const struct cli *cli = arg;
+	char err[256];
+	int rc;
+
+	lp_log_init(cli->verbose);
 #ifdef LP_TESTING
 	const char *divisor = getenv("LP_TEST_TIME_DIVISOR");
 	if (divisor && atoi(divisor) > 0)
 		lp_time_divisor = atoi(divisor);
 #endif
-
-	if (lp_options_load(config_path, &a.opt, err, sizeof err) != 0 ||
-	    lp_api_key_load(a.opt.api_key_file, a.key, err, sizeof err) != 0) {
+	if (lp_options_load(cli->config_path, &a.opt, err, sizeof err) != 0) {
+		lp_log(LP_ERR, "%s", err);
+		return LP_EXIT_CONFIG;
+	}
+	if (cli->log_file) {
+		lp_log_to_file(cli->log_file);
+	} else if (cli->service) {
+		char path[LP_FILE_PATH_SIZE + 16];
+		snprintf(path, sizeof path, "%s\\agent.log", a.opt.state_dir);
+		lp_log_to_file(path);
+	}
+	if (lp_api_key_load(a.opt.api_key_file, a.key, err, sizeof err) != 0) {
 		lp_log(LP_ERR, "%s", err);
 		return LP_EXIT_CONFIG;
 	}
@@ -565,7 +493,7 @@ int main(int argc, char **argv)
 		lp_wipe(a.key, sizeof a.key);
 		return LP_EXIT_RUNTIME;
 	}
-	if (check_only) {
+	if (cli->check_only) {
 		rc = check(&a);
 		goto out;
 	}
@@ -578,21 +506,75 @@ int main(int argc, char **argv)
 	}
 	if (a.state.new_session)
 		lp_log(LP_INFO, "started a new agent session");
-	if (setup_signals() != 0) {
+	if (lp_events_init() != 0) {
 		lp_log(LP_ERR, "cannot install signal handlers: %s", strerror(errno));
 		rc = LP_EXIT_RUNTIME;
 		goto out_state;
 	}
-	lp_collector_init(&a.collector);
+	if (lp_collector_init(&a.collector) != 0)
+		lp_log(LP_WARN, "some system counters are unavailable");
 	lp_log(LP_INFO, "%s %s starting for monitor %s", LP_AGENT_NAME, LP_VERSION, a.opt.monitor_id);
 
-	wait_until(lp_mono_ms() + lp_jitter_ms(lp_seconds(5)));
+	lp_wait_until(lp_mono_ms() + lp_jitter_ms(lp_seconds(5)));
 	a.next_config_ms = lp_mono_ms();
 	rc = run(&a);
+	lp_collector_cleanup();
 out_state:
 	lp_state_close(&a.state);
 out:
 	lp_transport_free(a.http);
 	lp_wipe(a.key, sizeof a.key);
 	return rc;
+}
+
+int main(int argc, char **argv)
+{
+	static const struct option longopts[] = {
+		{"config", required_argument, NULL, 'c'},
+		{"check", no_argument, NULL, 'k'},
+		{"log-file", required_argument, NULL, 'l'},
+		{"service", no_argument, NULL, 's'},
+		{"verbose", no_argument, NULL, 'v'},
+		{"version", no_argument, NULL, 'V'},
+		{"help", no_argument, NULL, 'h'},
+		{NULL, 0, NULL, 0},
+	};
+	struct cli cli = {.config_path = lp_default_config_path()};
+	int opt;
+
+	while ((opt = getopt_long(argc, argv, "c:vVh", longopts, NULL)) != -1) {
+		switch (opt) {
+		case 'c':
+			cli.config_path = optarg;
+			break;
+		case 'k':
+			cli.check_only = true;
+			break;
+		case 'l':
+			cli.log_file = optarg;
+			break;
+		case 's':
+			cli.service = true;
+			break;
+		case 'v':
+			cli.verbose = true;
+			break;
+		case 'V':
+			printf("%s %s\n", LP_AGENT_NAME, LP_VERSION);
+			return LP_EXIT_OK;
+		case 'h':
+			usage(stdout);
+			return LP_EXIT_OK;
+		default:
+			usage(stderr);
+			return LP_EXIT_CONFIG;
+		}
+	}
+	if (optind != argc || (cli.service && cli.check_only)) {
+		usage(stderr);
+		return LP_EXIT_CONFIG;
+	}
+	if (cli.service)
+		return lp_service_run(agent_main, &cli);
+	return agent_main(&cli);
 }

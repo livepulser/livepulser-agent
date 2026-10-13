@@ -12,7 +12,7 @@ struct lp_config {
 	char disk_path[LP_DISK_PATH_SIZE];
 	bool interface_explicit;
 	bool interface_valid;
-	char interface[LP_IFNAME_SIZE];
+	char ifname[LP_IFNAME_SIZE];
 };
 
 enum lp_config_result {

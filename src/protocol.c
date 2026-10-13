@@ -4,8 +4,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/utsname.h>
 #include <time.h>
+
+#include "platform.h"
 
 static const char *const metric_names[LP_M_COUNT] = {
 	"cpu_percent",
@@ -21,30 +22,11 @@ const char *lp_metric_name(enum lp_metric m)
 	return metric_names[m];
 }
 
-const char *lp_arch(void)
-{
-	static char arch[33];
-	struct utsname u;
-
-	if (arch[0])
-		return arch;
-	if (uname(&u) != 0)
-		snprintf(arch, sizeof arch, "unknown");
-	else if (strcmp(u.machine, "x86_64") == 0)
-		snprintf(arch, sizeof arch, "amd64");
-	else if (strcmp(u.machine, "aarch64") == 0 || strcmp(u.machine, "arm64") == 0)
-		snprintf(arch, sizeof arch, "arm64");
-	else
-		snprintf(arch, sizeof arch, "%.32s", u.machine);
-	return arch;
-}
-
 int lp_format_rfc3339(int64_t unix_ms, char *out, size_t cap)
 {
-	time_t secs = (time_t)(unix_ms / 1000);
 	struct tm tm;
 
-	if (!gmtime_r(&secs, &tm) || strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tm) == 0)
+	if (!lp_gmtime(unix_ms / 1000, &tm) || strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tm) == 0)
 		return -1;
 	return 0;
 }
@@ -89,10 +71,10 @@ int lp_report_write(const struct lp_report *r, char *buf, size_t cap, size_t *le
 	ok = append(buf, cap, &pos,
 		    "{\"schema_version\":1,\"boot_id\":\"%s\",\"sequence\":%lld,\"config_version\":%lld,"
 		    "\"observed_at\":\"%s\",\"sample_duration_ms\":%lld,"
-		    "\"agent\":{\"name\":\"" LP_AGENT_NAME "\",\"version\":\"" LP_VERSION "\",\"os\":\"linux\",\"arch\":\"%s\"},"
+		    "\"agent\":{\"name\":\"" LP_AGENT_NAME "\",\"version\":\"" LP_VERSION "\",\"os\":\"%s\",\"arch\":\"%s\"},"
 		    "\"metrics\":{",
 		    r->boot_id, (long long)r->sequence, (long long)r->config_version, observed,
-		    (long long)r->duration_ms, r->arch);
+		    (long long)r->duration_ms, lp_os_name(), r->arch);
 
 	for (int i = 0; ok && i < LP_M_COUNT; i++) {
 		const char *sep = i ? "," : "";

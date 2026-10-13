@@ -11,9 +11,10 @@ enum {
 	LP_STATE_LOCKED = -2,
 };
 
+struct lp_dir;
+
 struct lp_state {
-	int dir_fd;
-	int lock_fd;
+	struct lp_dir *dir;
 	char monitor_id[LP_UUID_LEN + 1];
 	char endpoint[LP_ENDPOINT_SIZE];
 	char boot_id[LP_UUID_LEN + 1];

@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "platform.h"
+
 #define RTF_UP_FLAG 0x0001
 #define RTF_REJECT_FLAG 0x0200
 
@@ -100,31 +102,12 @@ int lp_parse_stat(FILE *f, struct lp_cpu *out)
 			out->idle = out->field[3];
 			if (add_u64(&out->idle, out->field[4]))
 				return -1;
+			/* The kernel documents that iowait can go backwards; aggregate checks still apply. */
+			out->may_decrease = 1u << 4;
 			out->valid = true;
 		}
 	}
 	return out->valid && out->ncpu > 0 ? 0 : -1;
-}
-
-int lp_cpu_percent(const struct lp_cpu *a, const struct lp_cpu *b, double *out)
-{
-	uint64_t dt, di;
-
-	if (!a->valid || !b->valid || a->ncpu != b->ncpu)
-		return -1;
-	if (b->total < a->total || b->idle < a->idle)
-		return -1;
-	/* iowait (field 4) may legitimately decrease on some kernels; the aggregate checks above cover it. */
-	for (int i = 0; i < 8; i++) {
-		if (i != 4 && b->field[i] < a->field[i])
-			return -1;
-	}
-	dt = b->total - a->total;
-	di = b->idle - a->idle;
-	if (dt == 0 || di > dt)
-		return -1;
-	*out = 100.0 * (double)(dt - di) / (double)dt;
-	return 0;
 }
 
 int lp_parse_meminfo(FILE *f, struct lp_meminfo *out)
@@ -170,20 +153,14 @@ int lp_memory_percent(const struct lp_meminfo *m, double *out)
 {
 	if ((m->have & (HAVE_MEM_TOTAL | HAVE_MEM_AVAILABLE)) != (HAVE_MEM_TOTAL | HAVE_MEM_AVAILABLE))
 		return -1;
-	if (m->mem_total == 0 || m->mem_available > m->mem_total)
-		return -1;
-	*out = 100.0 * (double)(m->mem_total - m->mem_available) / (double)m->mem_total;
-	return 0;
+	return lp_used_percent(m->mem_total, m->mem_available, out);
 }
 
 int lp_swap_percent(const struct lp_meminfo *m, double *out)
 {
 	if ((m->have & (HAVE_SWAP_TOTAL | HAVE_SWAP_FREE)) != (HAVE_SWAP_TOTAL | HAVE_SWAP_FREE))
 		return -1;
-	if (m->swap_total == 0 || m->swap_free > m->swap_total)
-		return -1;
-	*out = 100.0 * (double)(m->swap_total - m->swap_free) / (double)m->swap_total;
-	return 0;
+	return lp_used_percent(m->swap_total, m->swap_free, out);
 }
 
 int lp_parse_netdev(FILE *f, const char *ifname, uint64_t *rx, uint64_t *tx)
@@ -211,19 +188,6 @@ int lp_parse_netdev(FILE *f, const char *ifname, uint64_t *rx, uint64_t *tx)
 		return 0;
 	}
 	return -1;
-}
-
-int lp_rate(uint64_t start, uint64_t end, int64_t elapsed_ms, double *out)
-{
-	double rate;
-
-	if (end < start || elapsed_ms <= 0)
-		return -1;
-	rate = (double)(end - start) * 1000.0 / (double)elapsed_ms;
-	if (rate > 1e12)
-		return -1;
-	*out = rate;
-	return 0;
 }
 
 struct route_pick {
@@ -312,26 +276,4 @@ enum lp_route_result lp_route_v6(FILE *f, char out[LP_IFNAME_SIZE])
 			consider(&pick, tok[9], metric);
 	}
 	return finish(&pick, out);
-}
-
-int lp_disk_percent(uint64_t blocks, uint64_t bfree, double *out)
-{
-	if (blocks == 0 || bfree > blocks)
-		return -1;
-	*out = 100.0 * (double)(blocks - bfree) / (double)blocks;
-	return 0;
-}
-
-bool lp_valid_ifname(const char *name)
-{
-	size_t n = strlen(name);
-
-	if (n == 0 || n >= LP_IFNAME_SIZE || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-		return false;
-	for (size_t i = 0; i < n; i++) {
-		unsigned char c = (unsigned char)name[i];
-		if (c <= ' ' || c >= 0x7f || c == '/' || c == ':')
-			return false;
-	}
-	return true;
 }

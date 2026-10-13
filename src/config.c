@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "cJSON.h"
-#include "procfs.h"
+#include "platform.h"
 
 static bool get_integer(const cJSON *obj, const char *key, int64_t min, int64_t max, int64_t *out)
 {
@@ -87,7 +87,7 @@ enum lp_config_result lp_config_parse(const char *json, size_t len, struct lp_co
 		}
 		if (item->valuestring[0] != '\0') {
 			size_t n = strlen(item->valuestring);
-			c.disk_path_valid = item->valuestring[0] == '/' && n < sizeof c.disk_path;
+			c.disk_path_valid = n < sizeof c.disk_path && lp_valid_disk_path(item->valuestring);
 			if (c.disk_path_valid)
 				memcpy(c.disk_path, item->valuestring, n + 1);
 		}
@@ -104,7 +104,7 @@ enum lp_config_result lp_config_parse(const char *json, size_t len, struct lp_co
 			c.interface_explicit = true;
 			c.interface_valid = lp_valid_ifname(item->valuestring);
 			if (c.interface_valid)
-				snprintf(c.interface, sizeof c.interface, "%s", item->valuestring);
+				snprintf(c.ifname, sizeof c.ifname, "%s", item->valuestring);
 		}
 	}
 
@@ -120,5 +120,5 @@ bool lp_config_changes_window(const struct lp_config *old, const struct lp_confi
 	return old->interval_s != new->interval_s || old->active != new->active ||
 	       old->disk_path_valid != new->disk_path_valid || strcmp(old->disk_path, new->disk_path) != 0 ||
 	       old->interface_explicit != new->interface_explicit || old->interface_valid != new->interface_valid ||
-	       strcmp(old->interface, new->interface) != 0;
+	       strcmp(old->ifname, new->ifname) != 0;
 }

@@ -27,6 +27,4 @@ int lp_fetch_config(struct lp_transport *t, const char *etag, struct lp_response
 int lp_send_report(struct lp_transport *t, const char *body, size_t len, struct lp_response *r);
 void lp_transport_free(struct lp_transport *t);
 
-int64_t lp_parse_retry_after(const char *value, int64_t now_unix);
-
 #endif

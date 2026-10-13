@@ -22,7 +22,7 @@ enum {
 #define LP_MAX_CONFIG_BYTES 16384
 #define LP_API_KEY_LEN 43
 #define LP_UUID_LEN 36
-#define LP_IFNAME_SIZE 16
+#define LP_IFNAME_SIZE 65
 #define LP_ENDPOINT_SIZE 257
 #define LP_DISK_PATH_SIZE 257
 #define LP_FILE_PATH_SIZE 1024
@@ -57,5 +57,7 @@ int lp_random_bytes(void *buf, size_t n);
 int64_t lp_jitter_ms(int64_t max_ms);
 int lp_uuid4(char out[LP_UUID_LEN + 1]);
 bool lp_valid_uuid(const char *s);
+int64_t lp_parse_http_date(const char *s);
+int64_t lp_parse_retry_after(const char *value, int64_t now_unix);
 
 #endif

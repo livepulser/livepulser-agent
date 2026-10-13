@@ -29,7 +29,6 @@ struct lp_report {
 };
 
 const char *lp_metric_name(enum lp_metric m);
-const char *lp_arch(void);
 int lp_format_rfc3339(int64_t unix_ms, char *out, size_t cap);
 int lp_report_write(const struct lp_report *r, char *buf, size_t cap, size_t *len);
 

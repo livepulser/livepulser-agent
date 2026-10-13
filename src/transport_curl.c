@@ -21,30 +21,6 @@ struct lp_transport {
 	bool overflow;
 };
 
-int64_t lp_parse_retry_after(const char *value, int64_t now_unix)
-{
-	char *end;
-	long long secs;
-	time_t when;
-
-	while (*value == ' ')
-		value++;
-	if (*value >= '0' && *value <= '9') {
-		secs = strtoll(value, &end, 10);
-		while (*end == ' ')
-			end++;
-		if (*end)
-			return -1;
-		return secs > 86400 ? 86400 : secs;
-	}
-	when = curl_getdate(value, NULL);
-	if (when == (time_t)-1)
-		return -1;
-	if ((int64_t)when <= now_unix)
-		return 0;
-	return (int64_t)when - now_unix > 86400 ? 86400 : (int64_t)when - now_unix;
-}
-
 static size_t on_body(char *data, size_t size, size_t nmemb, void *userdata)
 {
 	struct lp_transport *t = userdata;
@@ -101,8 +77,8 @@ static size_t on_header(char *line, size_t size, size_t nmemb, void *userdata)
 		int64_t secs = lp_parse_retry_after(value, (int64_t)time(NULL));
 		r->retry_after_ms = secs < 0 ? -1 : lp_seconds(secs);
 	} else if (header_value(line, len, "Date", value, sizeof value)) {
-		time_t d = curl_getdate(value, NULL);
-		r->server_date = d == (time_t)-1 ? 0 : (int64_t)d;
+		int64_t d = lp_parse_http_date(value);
+		r->server_date = d < 0 ? 0 : d;
 	}
 	return len;
 }

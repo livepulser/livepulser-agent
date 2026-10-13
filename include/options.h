@@ -3,9 +3,6 @@
 
 #include "agent.h"
 
-#define LP_DEFAULT_CONFIG "/etc/livepulser-agent/agent.conf"
-#define LP_DEFAULT_STATE_DIR "/var/lib/livepulser-agent"
-
 struct lp_options {
 	char endpoint[LP_ENDPOINT_SIZE];
 	char monitor_id[LP_UUID_LEN + 1];

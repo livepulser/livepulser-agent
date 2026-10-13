@@ -321,7 +321,9 @@ def main():
         else:
             assert cpu is not None and mem is not None and tx is not None and rx is not None, s
     gaps = [b["time"] - a["time"] for a, b in zip(first, first[1:])]
-    assert all(INTERVAL * 0.8 <= g <= INTERVAL * 1.4 for g in gaps), gaps
+    if not all(INTERVAL * 0.8 <= g <= INTERVAL * 1.4 for g in gaps):
+        statuses = [(r["kind"], r["status"], r["body"]["trigger"] if r["body"] else None) for r in API.log]
+        raise AssertionError("upload gaps %s\nrequests %s\nagent log:\n%s" % (gaps, statuses, agent.output()[-4000:]))
     print("ok   samples every second, uploaded in batches every two seconds")
 
     configs = len(API.requests("config", 200))

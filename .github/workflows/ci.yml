@@ -16,7 +16,7 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-22.04]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev
       - run: make
@@ -27,10 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-13]
+        runner: [macos-14, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: make
       - run: make test
       - run: ls -l build/livepulser-agent && otool -L build/livepulser-agent
@@ -38,7 +38,7 @@ jobs:
   windows-build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install MinGW-w64
         run: sudo apt-get update && sudo apt-get install -y mingw-w64
       - name: Cross-compile
@@ -52,7 +52,7 @@ jobs:
     needs: windows-build
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           name: windows-binaries

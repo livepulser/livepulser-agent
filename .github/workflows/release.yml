@@ -18,7 +18,7 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev
       - run: make test
@@ -40,7 +40,7 @@ jobs:
   macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: make test
       - name: Package universal binary
         run: |
@@ -63,7 +63,7 @@ jobs:
   windows:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install MinGW-w64
         run: sudo apt-get update && sudo apt-get install -y mingw-w64 zip
       - name: Package

@@ -19,7 +19,9 @@ MONITOR = "6f1c2e9a-4b7d-4c3e-8a5f-0d2b9e7c1a34"
 KEY = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6"
 OTHER_KEY = "Zbcdefghijklmnopqrstuvwxyz0123456789ABCDE_-"
 INTERVAL = 2
-IFACE = "lo" if platform.system() == "Linux" else "lo0"
+SYSTEM = platform.system()
+FIXTURE = SYSTEM == "Linux"
+IFACE = {"Linux": "lo", "Darwin": "lo0", "Windows": "Loopback Pseudo-Interface 1"}[SYSTEM]
 METRICS = ["cpu_percent", "memory_percent", "disk_percent", "swap_percent",
            "network_tx_bytes_per_second", "network_rx_bytes_per_second"]
 
@@ -180,15 +182,18 @@ def wait_for(predicate, timeout, what):
 class Agent:
     def __init__(self, work, conf, *args):
         self.log_path = os.path.join(work, "agent-%d.log" % time.monotonic_ns())
-        env = dict(os.environ, LP_TEST_PROC_ROOT=os.path.join(work, "proc"), LP_TEST_TIME_DIVISOR="60",
-                   ASAN_OPTIONS="detect_leaks=%d" % (platform.system() == "Linux"), https_proxy="http://127.0.0.1:9", http_proxy="http://127.0.0.1:9")
+        env = dict(os.environ, LP_TEST_TIME_DIVISOR="60", ASAN_OPTIONS="detect_leaks=%d" % FIXTURE,
+                   https_proxy="http://127.0.0.1:9", http_proxy="http://127.0.0.1:9")
+        if FIXTURE:
+            env["LP_TEST_PROC_ROOT"] = os.path.join(work, "proc")
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP if SYSTEM == "Windows" else 0
         self.log = open(self.log_path, "w")
         self.proc = subprocess.Popen([AGENT, "--config", conf, "--verbose"] + list(args),
-                                     stdout=subprocess.PIPE, stderr=self.log, env=env)
+                                     stdout=subprocess.PIPE, stderr=self.log, env=env, creationflags=flags)
 
     def stop(self):
         if self.proc.poll() is None:
-            self.proc.send_signal(signal.SIGTERM)
+            self.proc.send_signal(signal.CTRL_BREAK_EVENT if SYSTEM == "Windows" else signal.SIGTERM)
         code = self.proc.wait(timeout=15)
         self.log.close()
         return code
@@ -196,6 +201,38 @@ class Agent:
     def output(self):
         with open(self.log_path) as f:
             return f.read()
+
+
+def rotate_key_posix(agent, key_file):
+    with API.lock:
+        API.key = OTHER_KEY
+    wait_for(lambda: API.requests("telemetry", 401), 10, "a 401")
+    time.sleep(0.5)
+    total = len(API.log)
+    time.sleep(4)
+    assert len(API.log) == total, "requests continued after 401"
+    write_atomic(key_file, OTHER_KEY + "\n")
+    os.chmod(key_file, 0o600)
+    count = len(accepted())
+    agent.proc.send_signal(signal.SIGHUP)
+    wait_for(lambda: len(accepted()) > count, 15, "reports after key reload")
+    print("ok   401 stops requests until SIGHUP reloads the key")
+    return OTHER_KEY
+
+
+def rotate_key_windows(agent, key_file):
+    """Console runs have no reload signal; the service uses SERVICE_CONTROL_PARAMCHANGE instead."""
+    with API.lock:
+        API.key = OTHER_KEY
+    wait_for(lambda: API.requests("telemetry", 401), 10, "a 401")
+    time.sleep(0.5)
+    total = len(API.log)
+    time.sleep(4)
+    assert len(API.log) == total, "requests continued after 401"
+    print("ok   401 stops requests")
+    with API.lock:
+        API.key = KEY
+    return KEY
 
 
 def accepted():
@@ -216,7 +253,8 @@ def main():
     write_atomic(conf, "endpoint=http://127.0.0.1:%d\nmonitor_id=%s\napi_key_file=%s\nstate_dir=%s\n"
                  % (server.server_address[1], MONITOR.upper(), key_file, state))
     proc = FakeProc(os.path.join(work, "proc"))
-    proc.start()
+    if FIXTURE:
+        proc.start()
 
     check = subprocess.run([AGENT, "--config", conf, "--check"], capture_output=True, text=True,
                            env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
@@ -230,15 +268,21 @@ def main():
     assert [r["body"]["sequence"] for r in first] == [1, 2, 3]
     for r in first:
         m = r["body"]["metrics"]
-        assert abs(m["cpu_percent"] - 30.0) < 0.01, m
-        assert abs(m["memory_percent"] - 25.0) < 0.01 and abs(m["swap_percent"] - 25.0) < 0.01, m
+        assert r["body"]["agent"]["os"] == {"Linux": "linux", "Darwin": "darwin", "Windows": "windows"}[SYSTEM]
         assert m["disk_percent"] is not None
-        assert 800 <= m["network_tx_bytes_per_second"] <= 1200, m
-        assert 1600 <= m["network_rx_bytes_per_second"] <= 2400, m
+        if FIXTURE:
+            assert abs(m["cpu_percent"] - 30.0) < 0.01, m
+            assert abs(m["memory_percent"] - 25.0) < 0.01 and abs(m["swap_percent"] - 25.0) < 0.01, m
+            assert 800 <= m["network_tx_bytes_per_second"] <= 1200, m
+            assert 1600 <= m["network_rx_bytes_per_second"] <= 2400, m
+        else:
+            for k in ("cpu_percent", "memory_percent", "disk_percent"):
+                assert m[k] is not None and 0 <= m[k] <= 100, m
+            assert m["network_tx_bytes_per_second"] is not None and m["network_rx_bytes_per_second"] is not None, m
         assert r["headers"]["Content-Type"] == "application/json"
     gaps = [b["time"] - a["time"] for a, b in zip(first, first[1:])]
     assert all(INTERVAL * 0.8 <= g <= INTERVAL * 1.3 for g in gaps), gaps
-    print("ok   healthy reports carry exact metrics at the configured cadence")
+    print("ok   healthy reports carry %s metrics at the configured cadence" % ("exact fixture" if FIXTURE else "native"))
 
     wait_for(lambda: API.requests("config", 304), 15, "conditional config refresh")
     print("ok   config refresh uses If-None-Match and accepts 304")
@@ -280,19 +324,7 @@ def main():
     wait_for(lambda: len(accepted()) > count, 20, "reports after resume")
     print("ok   pausing suspends telemetry and resuming restarts it")
 
-    with API.lock:
-        API.key = OTHER_KEY
-    wait_for(lambda: API.requests("telemetry", 401), 10, "a 401")
-    time.sleep(0.5)
-    total = len(API.log)
-    time.sleep(4)
-    assert len(API.log) == total, "requests continued after 401"
-    write_atomic(key_file, OTHER_KEY + "\n")
-    os.chmod(key_file, 0o600)
-    count = len(accepted())
-    agent.proc.send_signal(signal.SIGHUP)
-    wait_for(lambda: len(accepted()) > count, 15, "reports after key reload")
-    print("ok   401 stops requests until SIGHUP reloads the key")
+    file_key = (rotate_key_windows if SYSTEM == "Windows" else rotate_key_posix)(agent, key_file)
 
     second = Agent(work, conf)
     assert second.proc.wait(timeout=10) == 78 and "another agent instance" in second.output()
@@ -321,13 +353,14 @@ def main():
     agent.stop()
     with API.lock:
         API.schema = 1
-        API.key = KEY
+        API.key = KEY if file_key == OTHER_KEY else OTHER_KEY
     check = subprocess.run([AGENT, "--config", conf, "--check"], capture_output=True, text=True,
                            env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
     assert check.returncode == 77, check
     print("ok   unsupported schema exits 78 and a rejected key exits 77")
 
-    proc.stopped.set()
+    if FIXTURE:
+        proc.stopped.set()
     server.shutdown()
     print("integration tests passed")
 

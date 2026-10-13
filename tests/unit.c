@@ -1,18 +1,36 @@
-#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#include <windows.h>
+#include <sddl.h>
+#define access _access
+#define F_OK 0
+#else
 #include <unistd.h>
+#endif
 
 #include "cJSON.h"
 #include "config.h"
+#include "metrics.h"
 #include "options.h"
+#include "platform.h"
 #include "policy.h"
 #include "procfs.h"
 #include "protocol.h"
 #include "state.h"
+
+#ifdef _WIN32
+#define TEST_DISK "D:/data"
+#define TEST_DIR "C:\\ProgramData\\LivePulser"
+#else
+#define TEST_DISK "/var"
+#define TEST_DIR "/etc/livepulser-agent"
+#endif
 
 static int failures, checks;
 
@@ -25,7 +43,7 @@ static int failures, checks;
 		}                                                                \
 	} while (0)
 
-#define NEAR(a, b) CHECK(fabs((a) - (b)) < 1e-6)
+#define CLOSE_TO(a, b) CHECK(fabs((a) - (b)) < 1e-6)
 
 static FILE *fixture(const char *name)
 {
@@ -58,13 +76,13 @@ static void test_cpu(void)
 	CHECK(a.ncpu == 2);
 	CHECK(a.total == 9860);
 	CHECK(lp_cpu_percent(&a, &b, &pct) == 0);
-	NEAR(pct, 40.0);
+	CLOSE_TO(pct, 40.0);
 	CHECK(lp_cpu_percent(&a, &a, &pct) == -1);
 	CHECK(lp_cpu_percent(&b, &a, &pct) == -1);
 
 	read_stat("stat_iowait_drop", &c, 0);
 	CHECK(lp_cpu_percent(&a, &c, &pct) == 0);
-	NEAR(pct, 100.0 * 400 / 970);
+	CLOSE_TO(pct, 100.0 * 400 / 970);
 
 	read_stat("stat_hotplug", &c, 0);
 	CHECK(lp_cpu_percent(&a, &c, &pct) == -1);
@@ -82,9 +100,9 @@ static void test_memory(void)
 	CHECK(lp_parse_meminfo(f, &m) == 0);
 	fclose(f);
 	CHECK(lp_memory_percent(&m, &pct) == 0);
-	NEAR(pct, 25.0);
+	CLOSE_TO(pct, 25.0);
 	CHECK(lp_swap_percent(&m, &pct) == 0);
-	NEAR(pct, 25.0);
+	CLOSE_TO(pct, 25.0);
 
 	f = fixture("meminfo_noavail");
 	CHECK(lp_parse_meminfo(f, &m) == 0);
@@ -110,7 +128,7 @@ static void test_network(void)
 	fclose(f);
 
 	CHECK(lp_rate(1000, 61000, 60000, &rate) == 0);
-	NEAR(rate, 1000.0);
+	CLOSE_TO(rate, 1000.0);
 	CHECK(lp_rate(5000, 1000, 60000, &rate) == -1);
 	CHECK(lp_rate(0, 1000, 0, &rate) == -1);
 
@@ -129,28 +147,64 @@ static void test_network(void)
 	CHECK(strcmp(name, "ens3") == 0);
 	fclose(f);
 
+}
+
+static void test_platform(void)
+{
+	struct lp_clock a, b;
+	struct tm tm;
+
 	CHECK(lp_valid_ifname("eth0"));
-	CHECK(lp_valid_ifname("enp0s31f6.100"));
 	CHECK(!lp_valid_ifname(""));
+#ifdef _WIN32
+	CHECK(lp_valid_ifname("Ethernet 2"));
+	CHECK(lp_valid_disk_path("/"));
+	CHECK(lp_valid_disk_path("C:\\"));
+	CHECK(lp_valid_disk_path("d:/data"));
+	CHECK(!lp_valid_disk_path("/var"));
+	CHECK(!lp_valid_disk_path("C:"));
+	CHECK(lp_path_is_absolute("C:\\ProgramData\\LivePulser\\agent.conf"));
+	CHECK(!lp_path_is_absolute("agent.conf"));
+#else
+	CHECK(lp_valid_ifname("enp0s31f6.100"));
 	CHECK(!lp_valid_ifname("a/b"));
 	CHECK(!lp_valid_ifname(".."));
 	CHECK(!lp_valid_ifname("sixteen-chars-xx"));
+	CHECK(lp_valid_disk_path("/var"));
+	CHECK(!lp_valid_disk_path("C:\\"));
+	CHECK(lp_path_is_absolute("/etc/livepulser-agent/agent.conf"));
+#endif
+	lp_clock_now(&a);
+	lp_clock_now(&b);
+	CHECK(b.mono_ms >= a.mono_ms && a.mono_ms > 0 && a.boot_ms > 0);
+	CHECK(a.real_ms > 1700000000000LL);
+	CHECK(lp_gmtime(1791882000, &tm) && tm.tm_year == 126 && tm.tm_mon == 9 && tm.tm_mday == 13);
+	CHECK(strcmp(lp_os_name(), "") != 0 && strlen(lp_arch()) > 0);
+
+	CHECK(lp_parse_http_date("Tue, 13 Oct 2026 09:00:00 GMT") == 1791882000);
+	CHECK(lp_parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT") == 0);
+	CHECK(lp_parse_http_date("Tue, 13 Foo 2026 09:00:00 GMT") == -1);
+	CHECK(lp_parse_http_date("Tue, 13 Oct 2026 09:00:00 UTC") == -1);
+	CHECK(lp_parse_retry_after("60", 0) == 60);
+	CHECK(lp_parse_retry_after("Tue, 13 Oct 2026 09:01:00 GMT", 1791882000) == 60);
+	CHECK(lp_parse_retry_after("Tue, 13 Oct 2026 08:00:00 GMT", 1791882000) == 0);
+	CHECK(lp_parse_retry_after("soon", 0) == -1);
 }
 
 static void test_disk(void)
 {
 	double pct;
 
-	CHECK(lp_disk_percent(1000, 250, &pct) == 0);
-	NEAR(pct, 75.0);
-	CHECK(lp_disk_percent(0, 0, &pct) == -1);
-	CHECK(lp_disk_percent(10, 11, &pct) == -1);
+	CHECK(lp_used_percent(1000, 250, &pct) == 0);
+	CLOSE_TO(pct, 75.0);
+	CHECK(lp_used_percent(0, 0, &pct) == -1);
+	CHECK(lp_used_percent(10, 11, &pct) == -1);
 }
 
 static const char *valid_config =
 	"{\"schema_version\":1,\"config_version\":2,\"report_interval_seconds\":60,"
 	"\"settings\":{\"cpu\":80,\"memory\":80,\"disk\":80,\"swap\":80,\"network\":{\"upload\":10240,\"download\":102400},"
-	"\"disk_path\":\"/var\",\"network_interface\":\"\"},"
+	"\"disk_path\":\"" TEST_DISK "\",\"network_interface\":\"\"},"
 	"\"thresholds\":{\"cpu_percent\":80},\"breach_reports\":3,\"recovery_reports\":2,"
 	"\"offline_after_seconds\":210,\"active\":true,\"future_field\":{\"x\":[1,2]}}";
 
@@ -167,7 +221,7 @@ static void test_config(void)
 
 	CHECK(parse(valid_config, &c) == LP_CONFIG_OK);
 	CHECK(c.config_version == 2 && c.interval_s == 60 && c.offline_after_s == 210 && c.active);
-	CHECK(strcmp(c.disk_path, "/var") == 0 && c.disk_path_valid);
+	CHECK(strcmp(c.disk_path, TEST_DISK) == 0 && c.disk_path_valid);
 	CHECK(!c.interface_explicit);
 
 	CHECK(parse("{\"schema_version\":1,\"config_version\":5,\"report_interval_seconds\":120,"
@@ -179,7 +233,7 @@ static void test_config(void)
 	CHECK(!lp_config_changes_window(&c, &d));
 
 	CHECK(parse("{\"schema_version\":1,\"config_version\":5,\"report_interval_seconds\":60,"
-		    "\"settings\":{\"network_interface\":\"bad/name\",\"disk_path\":\"relative\"},\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_OK);
+		    "\"settings\":{\"network_interface\":\"bad\\nname\",\"disk_path\":\"relative\"},\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_OK);
 	CHECK(d.interface_explicit && !d.interface_valid && !d.disk_path_valid);
 
 	CHECK(parse("{\"schema_version\":2,\"config_version\":1}", &d) == LP_CONFIG_UNSUPPORTED);
@@ -227,8 +281,8 @@ static void test_report(void)
 		metrics = cJSON_GetObjectItem(doc, "metrics");
 		missing = cJSON_GetObjectItem(doc, "unavailable_metrics");
 		CHECK(cJSON_GetArraySize(metrics) == 6);
-		NEAR(cJSON_GetObjectItem(metrics, "cpu_percent")->valuedouble, 24.5);
-		NEAR(cJSON_GetObjectItem(metrics, "network_tx_bytes_per_second")->valuedouble, 1500);
+		CLOSE_TO(cJSON_GetObjectItem(metrics, "cpu_percent")->valuedouble, 24.5);
+		CLOSE_TO(cJSON_GetObjectItem(metrics, "network_tx_bytes_per_second")->valuedouble, 1500);
 		CHECK(cJSON_IsNull(cJSON_GetObjectItem(metrics, "disk_percent")));
 		CHECK(cJSON_IsNull(cJSON_GetObjectItem(metrics, "swap_percent")));
 		CHECK(cJSON_IsNull(cJSON_GetObjectItem(metrics, "network_rx_bytes_per_second")));
@@ -256,7 +310,7 @@ static void test_options(void)
 	struct lp_options o;
 	char err[256];
 	const char *ok = "# comment\n endpoint = https://rs.livepulser.com/ \nmonitor_id=6F1C2E9A-4B7D-4C3E-8A5F-0D2B9E7C1A34\n"
-			 "api_key_file=/etc/livepulser-agent/api-key\nstate_dir=/var/lib/livepulser-agent\n";
+			 "api_key_file=" TEST_DIR "/api-key\nstate_dir=" TEST_DIR "/state\n";
 
 	CHECK(lp_options_parse(ok, strlen(ok), &o, err, sizeof err) == 0);
 	CHECK(strcmp(o.endpoint, "https://rs.livepulser.com") == 0);
@@ -275,24 +329,50 @@ static void test_options(void)
 	BAD("endpoint=https://a\nendpoint=https://b\n");
 #undef BAD
 	CHECK(lp_options_parse("endpoint=http://127.0.0.1:8080\n", 31, &o, err, sizeof err) == 0);
+	const char *bom = "\xEF\xBB\xBF" "endpoint=https://rs.livepulser.com\r\n";
+	CHECK(lp_options_parse(bom, strlen(bom), &o, err, sizeof err) == 0);
+	CHECK(strcmp(o.endpoint, "https://rs.livepulser.com") == 0);
 }
 
-static void write_file(const char *path, const char *text, mode_t mode)
+static void write_file(const char *path, const char *text, int mode)
 {
-	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
-	if (fd < 0 || write(fd, text, strlen(text)) != (ssize_t)strlen(text))
+	FILE *f = fopen(path, "wb");
+
+	if (!f || fwrite(text, 1, strlen(text), f) != strlen(text))
 		exit(2);
-	fchmod(fd, mode);
-	close(fd);
+	fclose(f);
+#ifdef _WIN32
+	char sddl[256], user[128] = "", *sid = NULL;
+	PSECURITY_DESCRIPTOR sd;
+	HANDLE token;
+	DWORD size;
+
+	if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+		if (GetTokenInformation(token, TokenUser, user, sizeof user, &size))
+			ConvertSidToStringSidA(((TOKEN_USER *)(void *)user)->User.Sid, &sid);
+		CloseHandle(token);
+	}
+	if (!sid)
+		exit(2);
+	snprintf(sddl, sizeof sddl, "D:P(A;;FA;;;%s)%s", sid, mode & 0044 ? "(A;;FR;;;WD)" : "");
+	LocalFree(sid);
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, &sd, NULL) ||
+	    !SetFileSecurityA(path, DACL_SECURITY_INFORMATION, sd))
+		exit(2);
+	LocalFree(sd);
+#else
+	chmod(path, (mode_t)mode);
+#endif
 }
 
 static void test_api_key(const char *dir)
 {
-	char path[512], key[LP_API_KEY_LEN + 1], err[256];
+	char path[512], key[LP_API_KEY_LEN + 1] = "", err[256];
 
 	snprintf(path, sizeof path, "%s/key", dir);
 	write_file(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6\n", 0600);
-	CHECK(lp_api_key_load(path, key, err, sizeof err) == 0);
+	if (lp_api_key_load(path, key, err, sizeof err) != 0)
+		fprintf(stderr, "api key load: %s\n", err);
 	CHECK(strcmp(key, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6") == 0);
 	write_file(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6\n", 0644);
 	CHECK(lp_api_key_load(path, key, err, sizeof err) == -1);
@@ -383,15 +463,27 @@ static void test_policy(void)
 
 int main(void)
 {
+#ifdef _WIN32
+	char dir[MAX_PATH];
+	DWORD n = GetTempPathA(sizeof dir, dir);
+
+	if (n == 0 || n > sizeof dir - 32)
+		return 2;
+	snprintf(dir + n, sizeof dir - n, "lp-unit-%lu-%lu", (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
+	if (_mkdir(dir) != 0)
+		return 2;
+#else
 	char dir[] = "/tmp/lp-unit-XXXXXX";
 
 	if (!mkdtemp(dir))
 		return 2;
 	chmod(dir, 0700);
+#endif
 	test_cpu();
 	test_memory();
 	test_network();
 	test_disk();
+	test_platform();
 	test_config();
 	test_report();
 	test_options();

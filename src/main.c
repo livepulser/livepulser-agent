@@ -101,7 +101,7 @@ static void apply_config(struct agent *a, const struct lp_config *c, const char 
 		memset(&a->rules, 0, sizeof a->rules);
 	}
 	if (first || c->interval_s != a->cfg.interval_s || (c->active && !a->cfg.active))
-		a->next_upload_ms = now + (int64_t)c->interval_s * 1000;
+		a->next_upload_ms = 0;
 	a->cfg = *c;
 	a->have_config = true;
 	snprintf(a->etag, sizeof a->etag, "%s", etag);
@@ -323,6 +323,9 @@ static void open_window(struct agent *a)
 	lp_collect_counters(&a->collector, &a->baseline);
 	a->window_open = true;
 	a->window_end_ms = a->baseline.clock.mono_ms + lp_window_length_ms(a->cfg.sample_s);
+	/* Upload just after a sample boundary so each batch includes the sample that just ended. */
+	if (!a->next_upload_ms)
+		a->next_upload_ms = a->baseline.clock.mono_ms + (int64_t)a->cfg.interval_s * 1000 + 200;
 }
 
 static void close_window(struct agent *a)
@@ -350,7 +353,8 @@ static void close_window(struct agent *a)
 		lp_log(status == LP_WINDOW_TOO_LONG ? LP_INFO : LP_WARN, "discarding sample: %s", lp_window_status_text(status));
 	}
 
-	if (status == LP_WINDOW_OK && end.clock.mono_ms - a->window_end_ms < 1000)
+	/* Keep the cadence when on time; a late close starts the next window from now so it is not too short. */
+	if (status == LP_WINDOW_OK && end.clock.mono_ms - a->window_end_ms < len / 10)
 		a->window_end_ms += len;
 	else
 		a->window_end_ms = end.clock.mono_ms + len;
@@ -414,14 +418,14 @@ static int run(struct agent *a)
 				close_window(a);
 				continue;
 			}
-			if (now >= a->next_upload_ms) {
+			if (a->next_upload_ms && now >= a->next_upload_ms) {
 				a->next_upload_ms += (int64_t)a->cfg.interval_s * 1000;
 				if (a->next_upload_ms <= now)
 					a->next_upload_ms = now + (int64_t)a->cfg.interval_s * 1000;
 				upload(a, "interval");
 				continue;
 			}
-			wake = min64(wake, min64(a->window_end_ms, a->next_upload_ms));
+			wake = min64(wake, a->next_upload_ms ? min64(a->window_end_ms, a->next_upload_ms) : a->window_end_ms);
 		}
 		lp_wait_until(wake);
 	}

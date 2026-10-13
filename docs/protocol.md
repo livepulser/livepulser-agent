@@ -1,8 +1,8 @@
-# Agent protocol (version 1)
+# Agent protocol (version 2)
 
-This document describes what the official agent sends and how it reacts to responses. Third-party agents can implement the same contract. The server is authoritative; if the two ever disagree, the server's behaviour wins.
+This document describes what the official agent sends and how it reacts to responses, so third-party agents can implement the same contract. The server is authoritative; if this document and the server ever disagree, the server wins.
 
-All requests go to the configured origin (`https://rs.livepulser.com`). They carry `Authorization: Bearer <api key>`, where the key is the 43-character key issued for the monitor. The key is never placed in a URL.
+All requests go to the configured origin (normally `https://rs.livepulser.com`) with `Authorization: Bearer <api key>`, where the key is the 43-character key issued for the monitor. The key never appears in a URL.
 
 ## Configuration
 
@@ -10,37 +10,26 @@ All requests go to the configured origin (`https://rs.livepulser.com`). They car
 GET /v1/resource/{monitor_id}/config
 ```
 
-The response is the configuration object itself, with no wrapper:
-
 ```json
 {
-  "schema_version": 1,
-  "config_version": 2,
+  "schema_version": 2,
+  "config_version": 12,
   "report_interval_seconds": 60,
+  "sample_seconds": 10,
   "settings": {"cpu": 80, "disk_path": "/", "network_interface": ""},
   "thresholds": {"cpu_percent": 80},
-  "breach_reports": 3,
-  "recovery_reports": 2,
+  "rules": {"breach_seconds": 30, "recovery_seconds": 60, "recovery_margin": 0},
   "offline_after_seconds": 210,
   "active": true
 }
 ```
 
-Validation:
+- `report_interval_seconds` (30–3600) is how often the agent uploads; `sample_seconds` is how often it measures.
+- `thresholds` uses the metric names below. `rules` decides when an alert opens and recovers (see [Alerts](#alerts)).
+- Unknown fields are ignored; an unknown `schema_version` makes the agent exit with code 78. The body is limited to 16 KiB and nesting to 16 levels.
+- The response carries an `ETag`; refreshes send `If-None-Match` and a 304 keeps the cached configuration.
 
-- An unknown `schema_version` makes the agent exit with code 78.
-- `config_version` must be a positive integer.
-- `report_interval_seconds` must be an integer from 60 to 3600.
-- `active` must be a boolean.
-- `settings` and `thresholds` must be objects. Within `settings`, `disk_path` and `network_interface` are optional strings.
-- Unknown fields are ignored.
-- The body is limited to 16 KiB and nesting to 16 levels.
-
-Refreshing:
-
-- The agent refreshes every five minutes plus 0–30 s of jitter. Each refresh sends `If-None-Match` with the last `ETag`, and a `304` keeps the cached object.
-- A malformed response never replaces a valid configuration.
-- When `active` is false, the agent stops measuring and keeps refreshing on the same cadence.
+**When the agent fetches configuration:** at start-up, whenever an upload response's `LP-Config-Version` header differs from the version it runs, every 60 s while the monitor is paused, and once an hour as a safety net. Dashboard changes therefore reach a running agent with its next upload, without polling.
 
 ## Telemetry
 
@@ -51,59 +40,53 @@ Content-Type: application/json
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "boot_id": "9d1c5aef-19be-4801-bb24-ac611f4c0d6d",
   "sequence": 42,
-  "config_version": 2,
-  "observed_at": "2026-10-13T09:00:00Z",
-  "sample_duration_ms": 60000,
-  "agent": {"name": "livepulser-agent", "version": "0.1.0", "os": "linux", "arch": "amd64"},
-  "metrics": {
-    "cpu_percent": 24.5,
-    "memory_percent": 52.0,
-    "disk_percent": 41.5,
-    "swap_percent": null,
-    "network_tx_bytes_per_second": 1500,
-    "network_rx_bytes_per_second": 3500
-  },
-  "unavailable_metrics": ["swap_percent"]
+  "config_version": 12,
+  "trigger": "interval",
+  "agent": {"name": "livepulser-agent", "version": "0.2.0", "os": "linux", "arch": "amd64"},
+  "start_ms": 1791882000000,
+  "samples": [
+    [10000, 10000, 24.5, 52.0, 41.5, null, 1500, 3500],
+    [20000, 10000, 26.1, 52.0, 41.5, null, 1720, 3100]
+  ]
 }
 ```
 
-- **All six metrics are always present.** Unavailable readings are `null` and listed exactly once in `unavailable_metrics`.
-- **Value ranges.** Percentages are 0–100. Rates are 0–10¹² bytes per second.
-- **No extra fields.** Unknown fields are rejected, and the body must be under 8 KiB.
-- **Duration.** `sample_duration_ms` must be within 0.5–1.5× the interval and at most 3,600,000.
-- **Observation time.** `observed_at` must be no more than five minutes old and no more than two minutes in the future.
-- **Agent identity.** `agent.os` is `linux`, `darwin` or `windows`, and `agent.arch` is `amd64` or `arm64`. The dashboard uses them to show the server platform.
-- **Session.** `boot_id` identifies an agent session. It is a random UUID kept in the state directory, not the kernel boot ID.
-- **Sequence numbers.** Within a session, `sequence` increases strictly and never exceeds 2⁵³−1. The agent reserves blocks of 256 numbers with an atomic, fsynced state write. After a restart it skips the rest of the reserved block, so a number is never reused. Gaps are expected.
+- Each sample is `[end_offset_ms, duration_ms, cpu_percent, memory_percent, disk_percent, swap_percent, network_tx_bytes_per_second, network_rx_bytes_per_second]`, with offsets relative to `start_ms` (Unix milliseconds). Samples are contiguous and ordered.
+- One upload carries 1–60 samples and must stay under 8 KiB. Unavailable readings are `null`; percentages are 0–100 and rates 0–10¹² bytes per second.
+- The last sample must end within five minutes before or two minutes after server time.
+- `trigger` is `interval` for the regular upload, or `breach` / `recovery` when the agent's local evaluation changes state. Those upload immediately, at most four per minute.
+- `boot_id` identifies an agent session: a random UUID kept in the state directory. `sequence` increases strictly within a session and is reserved on disk in blocks of 256, so it is never reused after a restart.
+- `agent.os` is `linux`, `darwin` or `windows`; the dashboard shows it as the server platform.
+
+Samples that fail to upload stay buffered (up to 60) and go out with the next upload; the server ignores samples it has already counted, so retries never double count.
 
 ## Responses
 
 | Status | Agent behaviour |
 | --- | --- |
-| 202 | Accepted (or an exact duplicate). Continue at the normal cadence. |
-| 401 | Stop sending and wait for a key reload (`SIGHUP`, or `paramchange` on Windows). At startup, exit with code 77. |
-| 403 | The monitor is paused or not provisioned. Refresh configuration and back off. |
-| 409 | Configuration version or session conflict. Refetch configuration once. If the version is unchanged, back off for at least the offline lease. The boot ID is never regenerated. |
-| 413 / 422 | Drop the report and log the reason, including clock skew taken from the `Date` header. Back off after repeated rejections. |
+| 202 | Accepted (or an exact duplicate). Buffered samples are released. |
+| 401 | Stop sending until the key is reloaded (`SIGHUP`, or `paramchange` on Windows). At start-up, exit with code 77. |
+| 403 | The monitor is paused or not provisioned. Drop buffered samples and refresh configuration. |
+| 409 | `LP-Conflict: sequence` or `session`. Back off; if the conflict outlasts the offline lease plus one interval, start one new session (at most once per process). |
+| 413 / 422 | Drop the samples and log the reason from the response body, including clock skew from the `Date` header. |
 | 429 | Honour `Retry-After` (at least 60 s) plus jitter. |
-| 5xx, network, TLS | Back off 60, 120, 240, then 300 s, plus 0–5 s jitter. A server `Retry-After` wins if it is longer. |
-| 3xx | Never followed. Logged as an endpoint misconfiguration. |
+| 5xx, network, TLS | Back off 60, 120, 240, then 300 s plus jitter; keep the samples. |
+| 3xx | Never followed; logged as an endpoint misconfiguration. |
 
-## Rate behaviour
+Every response to an authenticated upload carries `LP-Config-Version`.
 
-- **Normal traffic.** About 1,440 telemetry requests and 288 configuration requests per day at the default interval.
-- **Client-side caps.** At most two telemetry and two configuration requests per rolling minute.
-- **Retries.** A report is retried at most once, with an identical body. The retry happens only when it can land within 0.2 of the interval, so the next report stays at least 0.8 of the interval away, and within four minutes of `observed_at`. Otherwise the next fresh window is sent instead.
-- **No backlog.** Windows that end during a back-off are discarded. Nothing is queued or replayed after an outage.
+## Alerts
+
+The server evaluates alerts from the samples; the agent runs the same rule locally only to decide when to upload immediately.
+
+- A metric **breaches** once it has stayed at or above its threshold for `breach_seconds`.
+- An alert **recovers** once every metric that caused it has stayed at or below its recovery level for `recovery_seconds`. The recovery level is `threshold − recovery_margin` for percentages and `threshold × (1 − recovery_margin / 100)` for network rates. Metrics that did not cause the alert never block recovery.
+- A gap in samples (for example after the host slept) restarts the timers.
+- If no upload arrives for `offline_after_seconds` (3 × upload interval + 30 s), the server marks the agent offline; the next upload closes an offline-only incident.
 
 ## Session ownership
 
-Only one session can own a monitor. The server accepts a new session only after the old one has been silent for `offline_after_seconds` (3×interval + 30 s). When it accepts a new session, it retires the previous boot ID for 24 hours.
-
-The agent handles ownership as follows:
-
-- **Lost local state.** The agent starts a new session. If the state file was corrupt, it waits for the lease before its first report.
-- **Retired session.** This happens when another agent took the monitor over and then stopped, for example when an installation moved between hosts and back. The agent sees a 409 that persists, with unchanged configuration, for longer than the lease plus one interval. It then starts one new session. It does this at most once per process, so two hosts that share a key cannot keep displacing each other. If the conflict continues, the agent backs off and logs that another agent may be using the monitor.
+Only one session owns a monitor. The server accepts a new session only after the old one has been silent for `offline_after_seconds`, and retires the old boot ID for 24 hours. When local state is lost the agent starts a new session; if the state file was corrupt it first waits for that lease.

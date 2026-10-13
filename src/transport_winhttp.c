@@ -40,13 +40,13 @@ static void describe_error(struct lp_response *r, DWORD code)
 	snprintf(r->error, sizeof r->error, "WinHTTP error %lu%s%.200s", code, n ? ": " : "", msg);
 }
 
-static void query_header(HINTERNET req, DWORD which, char *out, size_t cap)
+static void query_header(HINTERNET req, DWORD which, const wchar_t *name, char *out, size_t cap)
 {
 	wchar_t value[LP_ETAG_SIZE];
 	DWORD size = sizeof value;
 
 	out[0] = '\0';
-	if (!WinHttpQueryHeaders(req, which, WINHTTP_HEADER_NAME_BY_INDEX, value, &size, WINHTTP_NO_HEADER_INDEX))
+	if (!WinHttpQueryHeaders(req, which, name ? name : WINHTTP_HEADER_NAME_BY_INDEX, value, &size, WINHTTP_NO_HEADER_INDEX))
 		return;
 	for (size_t i = 0; value[i]; i++) {
 		if (value[i] < 0x20 || value[i] >= 0x7f || i + 1 >= cap) {
@@ -91,13 +91,16 @@ static int perform(struct lp_transport *t, const wchar_t *verb, const wchar_t *p
 	WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
 			    &status, &size, WINHTTP_NO_HEADER_INDEX);
 	r->status = (long)status;
-	query_header(req, WINHTTP_QUERY_ETAG, r->etag, sizeof r->etag);
-	query_header(req, WINHTTP_QUERY_RETRY_AFTER, value, sizeof value);
+	query_header(req, WINHTTP_QUERY_ETAG, NULL, r->etag, sizeof r->etag);
+	query_header(req, WINHTTP_QUERY_CUSTOM, L"LP-Config-Version", value, sizeof value);
+	r->config_version = value[0] ? strtoll(value, NULL, 10) : 0;
+	query_header(req, WINHTTP_QUERY_CUSTOM, L"LP-Conflict", r->conflict, sizeof r->conflict);
+	query_header(req, WINHTTP_QUERY_RETRY_AFTER, NULL, value, sizeof value);
 	if (value[0]) {
 		int64_t secs = lp_parse_retry_after(value, (int64_t)time(NULL));
 		r->retry_after_ms = secs < 0 ? -1 : lp_seconds(secs);
 	}
-	query_header(req, WINHTTP_QUERY_DATE, value, sizeof value);
+	query_header(req, WINHTTP_QUERY_DATE, NULL, value, sizeof value);
 	if (value[0]) {
 		int64_t d = lp_parse_http_date(value);
 		r->server_date = d < 0 ? 0 : d;

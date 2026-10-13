@@ -2,7 +2,7 @@
 
 A small, auditable C agent that reports server resource usage to [LivePulser](https://livepulser.com) resource monitors. It runs on **Linux, macOS and Windows**.
 
-Each configured interval (60 seconds by default) the agent measures six values and sends them in one HTTPS request:
+The agent measures six values every few seconds and uploads them in batches (every 60 seconds by default):
 
 | Metric | Linux | macOS | Windows |
 | --- | --- | --- | --- |
@@ -12,11 +12,23 @@ Each configured interval (60 seconds by default) the agent measures six values a
 | Swap usage % | `/proc/meminfo` | `vm.swapusage` | paging file (`\Paging File(_Total)\% Usage`) |
 | Network upload / download | `/proc/net/dev` | interface counters (`NET_RT_IFLIST2`) | `GetIfEntry2` |
 
-The agent reports every interval, including when everything is healthy, because each report also acts as a heartbeat. LivePulser handles thresholds, incidents, offline detection and notifications; the agent never does. The interval, disk path, network interface and thresholds are all managed in the dashboard.
+The agent uploads on schedule even when everything is healthy, because each upload also acts as a heartbeat. It also checks thresholds locally and uploads immediately when a breach starts or ends, so alerts open within the breach time you choose instead of waiting for the next upload. LivePulser re-checks every sample and owns incidents, offline detection and notifications. Thresholds, alert timing, the upload interval, disk path and network interface are all managed in the dashboard.
+
+## Alert timing
+
+Each monitor has three settings in the dashboard:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| Alert after | 30 s | How long a metric must stay at or above its threshold before an alert opens |
+| Recover after | 60 s | How long the metrics that caused the alert must stay below their recovery level before it closes |
+| Recovery margin | 0 | How far below the threshold the recovery level sits (percentage points; percent of the threshold for network) |
+
+Only the metrics that caused an alert decide when it recovers, and the dashboard and notifications name them.
 
 ## Design goals
 
-- **Lightweight.** A single thread sleeps until the next deadline and wakes only to measure, send or refresh configuration. Memory use is bounded and nothing is written to disk per report. The agent never runs shell commands or helper tools.
+- **Lightweight.** A single thread sleeps until the next deadline and wakes only to measure, upload or refresh configuration. Configuration changes arrive with upload responses, so there is no polling. Memory use is bounded and nothing is written to disk per report. The agent never runs shell commands or helper tools.
 - **No extra runtime dependencies.** On Linux it uses the system libcurl. On macOS it uses the libcurl that ships with the OS. On Windows it uses WinHTTP, which is built into the system.
 - **Outbound HTTPS only.** The agent opens no listening sockets. TLS verification is always on and redirects are never followed. System and environment proxy settings are ignored unless a proxy is configured explicitly.
 - **Unprivileged.** It runs under a dedicated account with no administrator rights.

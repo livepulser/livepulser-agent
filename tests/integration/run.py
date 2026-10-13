@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end test: runs a test build of the agent against a local fake resource API."""
+"""End-to-end test: runs a test build of the agent against a local fake resource API (protocol v2)."""
 
 import hashlib
 import json
@@ -11,7 +11,6 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 AGENT = os.path.abspath(sys.argv[1])
@@ -19,12 +18,12 @@ MONITOR = "6f1c2e9a-4b7d-4c3e-8a5f-0d2b9e7c1a34"
 KEY = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6"
 OTHER_KEY = "Zbcdefghijklmnopqrstuvwxyz0123456789ABCDE_-"
 INTERVAL = 2
+SAMPLE = 1
 LEASE = 3
 SYSTEM = platform.system()
 FIXTURE = SYSTEM == "Linux"
 IFACE = {"Linux": "lo", "Darwin": "lo0", "Windows": "Loopback Pseudo-Interface 1"}[SYSTEM]
-METRICS = ["cpu_percent", "memory_percent", "disk_percent", "swap_percent",
-           "network_tx_bytes_per_second", "network_rx_bytes_per_second"]
+TRIGGERS = {"interval", "breach", "recovery"}
 
 
 class Api:
@@ -32,24 +31,34 @@ class Api:
         self.lock = threading.Lock()
         self.version = 1
         self.active = True
-        self.schema = 1
+        self.schema = 2
+        self.cpu_threshold = 80
         self.key = KEY
         self.forced = []
         self.log = []
         self.boot = None
         self.seq = 0
         self.last = 0.0
+        self.last_interval = 0.0
         self.retired = set()
+        self.events = []
 
     def config(self):
         body = json.dumps({
             "schema_version": self.schema, "config_version": self.version,
-            "report_interval_seconds": INTERVAL,
-            "settings": {"cpu": 80, "disk_path": "/", "network_interface": IFACE},
-            "thresholds": {"cpu_percent": 80}, "breach_reports": 3, "recovery_reports": 2,
+            "report_interval_seconds": INTERVAL, "sample_seconds": SAMPLE,
+            "settings": {"cpu": self.cpu_threshold, "disk_path": "/", "network_interface": IFACE},
+            "thresholds": {"cpu_percent": self.cpu_threshold},
+            "rules": {"breach_seconds": 2, "recovery_seconds": 2, "recovery_margin": 0},
             "offline_after_seconds": INTERVAL * 3 + 30, "active": self.active,
         }).encode()
         return body, '"%s"' % hashlib.sha256(body).hexdigest()
+
+    def bump(self, **changes):
+        with self.lock:
+            for k, v in changes.items():
+                setattr(self, k, v)
+            self.version += 1
 
     def requests(self, kind, status=None):
         with self.lock:
@@ -60,17 +69,24 @@ API = Api()
 
 
 def validate(report):
-    expected = {"schema_version", "boot_id", "sequence", "config_version", "observed_at",
-                "sample_duration_ms", "agent", "metrics", "unavailable_metrics"}
+    expected = {"schema_version", "boot_id", "sequence", "config_version", "trigger", "agent", "start_ms", "samples"}
     assert set(report) == expected, report.keys()
-    assert set(report["metrics"]) == set(METRICS)
-    nulls = [k for k in METRICS if report["metrics"][k] is None]
-    assert sorted(nulls) == sorted(report["unavailable_metrics"]), report
-    assert 1000 <= report["sample_duration_ms"] <= 3600000
-    assert INTERVAL * 500 <= report["sample_duration_ms"] <= INTERVAL * 1500
-    observed = datetime.strptime(report["observed_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    assert abs(observed.timestamp() - time.time()) < 10
+    assert report["schema_version"] == 2 and report["trigger"] in TRIGGERS
     assert report["agent"]["name"] == "livepulser-agent"
+    samples = report["samples"]
+    assert 1 <= len(samples) <= 60
+    prev_end = None
+    for s in samples:
+        assert len(s) == 8, s
+        end, dur = s[0], s[1]
+        assert isinstance(end, int) and isinstance(dur, int) and 1000 <= dur and end >= dur
+        if prev_end is not None:
+            assert end > prev_end and end - dur >= prev_end - 1000, samples
+        prev_end = end
+        for i, v in enumerate(s[2:]):
+            assert v is None or 0 <= v <= (100 if i < 4 else 1e12), s
+    last_end = (report["start_ms"] + samples[-1][0]) / 1000
+    assert abs(last_end - time.time()) < 10, "sample time out of window"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -114,32 +130,38 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404)
             report = json.loads(raw)
             validate(report)
+            headers = {"LP-Config-Version": str(API.version)}
             if API.forced:
-                status, headers = API.forced.pop(0)
+                status, extra = API.forced.pop(0)
+                headers.update(extra or {})
                 self.record("telemetry", status, report)
                 return self.reply(status, headers=headers)
-            status = 202
+            now = time.monotonic()
+            status, conflict = 202, ""
             if not self.authorized():
                 status = 401
             elif not API.active:
                 status = 403
-            elif report["config_version"] != API.version:
-                status = 409
             elif API.boot == report["boot_id"] and report["sequence"] == API.seq:
                 status = 202
             elif API.boot == report["boot_id"] and report["sequence"] < API.seq:
-                status = 409
+                status, conflict = 409, "sequence"
             elif API.boot not in (None, report["boot_id"]) and (
-                    report["boot_id"] in API.retired or time.monotonic() - API.last < LEASE):
-                status = 409
-            elif time.monotonic() - API.last < INTERVAL * 0.8:
+                    report["boot_id"] in API.retired or now - API.last < LEASE):
+                status, conflict = 409, "session"
+            elif report["trigger"] == "interval" and now - API.last_interval < INTERVAL * 0.8:
                 status = 429
-            if status == 202:
+                headers["Retry-After"] = "60"
+            if status == 202 and not (API.boot == report["boot_id"] and report["sequence"] == API.seq):
                 if API.boot not in (None, report["boot_id"]):
                     API.retired.add(API.boot)
-                API.boot, API.seq, API.last = report["boot_id"], report["sequence"], time.monotonic()
+                API.boot, API.seq, API.last = report["boot_id"], report["sequence"], now
+                if report["trigger"] == "interval":
+                    API.last_interval = now
+            if conflict:
+                headers["LP-Conflict"] = conflict
             self.record("telemetry", status, report)
-            self.reply(status, headers={"Retry-After": "60"} if status == 429 else None)
+            self.reply(status, headers=headers)
 
 
 def write_atomic(path, text):
@@ -149,11 +171,7 @@ def write_atomic(path, text):
 
 
 class FakeProc(threading.Thread):
-    """Counters follow elapsed time: 30% CPU, 1000 B/s upload, 2000 B/s download.
-
-    Values are derived from the clock rather than counted per tick, so a slow test host
-    only makes the files staler, never the long-run rates wrong.
-    """
+    """Counters follow elapsed time: 30% CPU, 1000 B/s upload, 2000 B/s download."""
 
     def __init__(self, root):
         super().__init__(daemon=True)
@@ -177,7 +195,7 @@ class FakeProc(threading.Thread):
                      "%s: %d 0 0 0 0 0 0 0 %d 0 0 0 0 0 0 0\n" % (IFACE.rjust(6), int(2000 * elapsed), int(1000 * elapsed)))
 
     def run(self):
-        while not self.stopped.wait(0.1):
+        while not self.stopped.wait(0.05):
             self.write()
 
 
@@ -214,6 +232,18 @@ class Agent:
             return f.read()
 
 
+def accepted():
+    return API.requests("telemetry", 202)
+
+
+def uploads(trigger):
+    return [r for r in accepted() if r["body"]["trigger"] == trigger]
+
+
+def all_samples(reports):
+    return [s for r in reports for s in r["body"]["samples"]]
+
+
 def rotate_key_posix(agent, key_file):
     with API.lock:
         API.key = OTHER_KEY
@@ -226,7 +256,7 @@ def rotate_key_posix(agent, key_file):
     os.chmod(key_file, 0o600)
     count = len(accepted())
     agent.proc.send_signal(signal.SIGHUP)
-    wait_for(lambda: len(accepted()) > count, 15, "reports after key reload")
+    wait_for(lambda: len(accepted()) > count, 15, "uploads after key reload")
     print("ok   401 stops requests until SIGHUP reloads the key")
     return OTHER_KEY
 
@@ -246,10 +276,6 @@ def rotate_key_windows(agent, key_file):
     return KEY
 
 
-def accepted():
-    return API.requests("telemetry", 202)
-
-
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -266,73 +292,79 @@ def main():
     proc = FakeProc(os.path.join(work, "proc"))
     if FIXTURE:
         proc.start()
+    env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0")
 
-    check = subprocess.run([AGENT, "--config", conf, "--check"], capture_output=True, text=True,
-                           env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+    check = subprocess.run([AGENT, "--config", conf, "--check"], capture_output=True, text=True, env=env)
     assert check.returncode == 0 and "configuration version 1" in check.stdout, check
+    assert "sample interval 1s" in check.stdout, check.stdout
     print("ok   --check prints the remote configuration")
 
     agent = Agent(work, conf)
-    wait_for(lambda: len(accepted()) >= 3, 20, "three accepted reports")
-    first = accepted()[:3]
+    wait_for(lambda: len(uploads("interval")) >= 3, 25, "three interval uploads")
+    first = uploads("interval")[:3]
     assert API.requests("config")[0]["time"] < first[0]["time"]
     assert [r["body"]["sequence"] for r in first] == [1, 2, 3]
+    samples = all_samples(first)
+    assert len(samples) >= 4, samples
     for r in first:
-        m = r["body"]["metrics"]
         assert r["body"]["agent"]["os"] == {"Linux": "linux", "Darwin": "darwin", "Windows": "windows"}[SYSTEM]
-        assert m["disk_percent"] is not None
-        if FIXTURE:
-            assert abs(m["cpu_percent"] - 30.0) < 0.01, m
-            assert abs(m["memory_percent"] - 25.0) < 0.01 and abs(m["swap_percent"] - 25.0) < 0.01, m
-            assert 600 <= m["network_tx_bytes_per_second"] <= 1400, m
-            assert 1200 <= m["network_rx_bytes_per_second"] <= 2800, m
-        else:
-            for k in ("cpu_percent", "memory_percent", "disk_percent"):
-                assert m[k] is not None and 0 <= m[k] <= 100, m
-            assert m["network_tx_bytes_per_second"] is not None and m["network_rx_bytes_per_second"] is not None, m
         assert r["headers"]["Content-Type"] == "application/json"
+    for s in samples:
+        cpu, mem, disk, swap, tx, rx = s[2:]
+        assert disk is not None
+        if FIXTURE:
+            assert abs(cpu - 30.0) < 3, s
+            assert abs(mem - 25.0) < 0.01 and abs(swap - 25.0) < 0.01, s
+            assert 500 <= tx <= 1500 and 1000 <= rx <= 3000, s
+        else:
+            assert cpu is not None and mem is not None and tx is not None and rx is not None, s
     gaps = [b["time"] - a["time"] for a, b in zip(first, first[1:])]
-    assert all(INTERVAL * 0.8 <= g <= INTERVAL * 1.3 for g in gaps), gaps
-    print("ok   healthy reports carry %s metrics at the configured cadence" % ("exact fixture" if FIXTURE else "native"))
+    assert all(INTERVAL * 0.8 <= g <= INTERVAL * 1.4 for g in gaps), gaps
+    print("ok   samples every second, uploaded in batches every two seconds")
 
-    wait_for(lambda: API.requests("config", 304), 15, "conditional config refresh")
-    print("ok   config refresh uses If-None-Match and accepts 304")
+    configs = len(API.requests("config", 200))
+    API.bump()
+    wait_for(lambda: len(API.requests("config", 200)) > configs, 10, "a config fetch after the version header changed")
+    wait_for(lambda: accepted()[-1]["body"]["config_version"] == API.version, 10, "uploads with the new version")
+    assert not API.requests("telemetry", 409)
+    print("ok   LP-Config-Version on upload responses triggers a config refresh")
 
-    with API.lock:
-        API.version = 2
-    wait_for(lambda: accepted()[-1]["body"]["config_version"] == 2, 15, "reports with config version 2")
-    assert API.requests("telemetry", 409), "expected a 409 before the refetch"
-    print("ok   409 triggers a config refetch and new reports use the new version")
+    API.bump(cpu_threshold=0)
+    wait_for(lambda: uploads("breach"), 15, "an immediate breach upload")
+    API.bump(cpu_threshold=100)
+    wait_for(lambda: uploads("recovery"), 15, "an immediate recovery upload")
+    API.bump(cpu_threshold=80)
+    print("ok   local rule changes upload immediately as breach and recovery")
 
     with API.lock:
         API.forced = [(429, {"Retry-After": "60"})]
     wait_for(lambda: API.requests("telemetry", 429), 10, "a 429 response")
     limited = API.requests("telemetry", 429)[-1]["time"]
-    wait_for(lambda: accepted()[-1]["time"] > limited, 15, "a report after the rate limit")
+    wait_for(lambda: accepted()[-1]["time"] > limited, 15, "an upload after the rate limit")
     assert accepted()[-1]["time"] - limited >= 0.9
     print("ok   429 Retry-After is honored")
 
     with API.lock:
         API.forced = [(503, None)]
     wait_for(lambda: API.requests("telemetry", 503), 10, "a 503 response")
-    failed = API.requests("telemetry", 503)[-1]["time"]
-    wait_for(lambda: accepted()[-1]["time"] > failed, 15, "a report after the outage")
-    assert accepted()[-1]["time"] - failed >= 0.9
-    print("ok   503 backs off before the next report")
+    failed = API.requests("telemetry", 503)[-1]
+    wait_for(lambda: accepted()[-1]["time"] > failed["time"], 15, "an upload after the outage")
+    resent = accepted()[-1]["body"]
+    assert accepted()[-1]["time"] - failed["time"] >= 0.9
+    first_failed = failed["body"]["start_ms"] + failed["body"]["samples"][0][0]
+    assert resent["start_ms"] + resent["samples"][0][0] <= first_failed, "failed samples are kept for the next upload"
+    print("ok   503 backs off and keeps the samples for the next upload")
 
-    with API.lock:
-        API.active = False
-        paused_at = time.monotonic()
-    wait_for(lambda: any(r["time"] > paused_at for r in API.requests("config", 200)), 15,
-             "the paused configuration to be fetched")
-    time.sleep(1)
-    paused_count = len(API.requests("telemetry"))
+    paused_at = time.monotonic()
+    API.bump(active=False)
+    wait_for(lambda: any(r["time"] > paused_at for r in API.requests("config", 200)), 15, "the paused config")
+    time.sleep(1.5)
+    paused = len(API.requests("telemetry"))
     time.sleep(3)
-    assert len(API.requests("telemetry")) == paused_count, "telemetry continued while paused"
-    with API.lock:
-        API.active = True
+    assert len(API.requests("telemetry")) == paused, "telemetry continued while paused"
     count = len(accepted())
-    wait_for(lambda: len(accepted()) > count, 20, "reports after resume")
+    API.bump(active=True)
+    wait_for(lambda: len(accepted()) > count, 20, "uploads after resume")
     print("ok   pausing suspends telemetry and resuming restarts it")
 
     file_key = (rotate_key_windows if SYSTEM == "Windows" else rotate_key_posix)(agent, key_file)
@@ -350,7 +382,7 @@ def main():
 
     count = len(accepted())
     agent = Agent(work, conf)
-    wait_for(lambda: len(accepted()) > count, 20, "reports after restart")
+    wait_for(lambda: len(accepted()) > count, 20, "uploads after restart")
     resumed = accepted()[count]["body"]
     assert resumed["boot_id"] == boot and resumed["sequence"] > max(last_seq, 256), resumed
     assert agent.stop() == 0
@@ -375,16 +407,15 @@ def main():
     print("ok   a session retired by another host is replaced once")
 
     with API.lock:
-        API.schema = 2
+        API.schema = 3
     agent = Agent(work, conf)
     assert agent.proc.wait(timeout=15) == 78
-    assert "unsupported configuration schema_version 2" in agent.output()
+    assert "unsupported configuration schema_version 3" in agent.output()
     agent.stop()
     with API.lock:
-        API.schema = 1
+        API.schema = 2
         API.key = KEY if file_key == OTHER_KEY else OTHER_KEY
-    check = subprocess.run([AGENT, "--config", conf, "--check"], capture_output=True, text=True,
-                           env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+    check = subprocess.run([AGENT, "--config", conf, "--check"], capture_output=True, text=True, env=env)
     assert check.returncode == 77, check
     print("ok   unsupported schema exits 78 and a rejected key exits 77")
 

@@ -7,7 +7,7 @@
 
 #define LP_AGENT_NAME "livepulser-agent"
 #ifndef LP_VERSION
-#define LP_VERSION "0.1.0"
+#define LP_VERSION "0.2.0"
 #endif
 
 enum {
@@ -20,6 +20,7 @@ enum {
 #define LP_MAX_SEQUENCE 9007199254740991LL
 #define LP_MAX_REPORT_BYTES 8192
 #define LP_MAX_CONFIG_BYTES 16384
+#define LP_MAX_SAMPLES 60
 #define LP_API_KEY_LEN 43
 #define LP_UUID_LEN 36
 #define LP_IFNAME_SIZE 65
@@ -31,7 +32,7 @@ enum {
 extern int64_t lp_time_divisor;
 #define LP_MIN_INTERVAL_S 1
 #else
-#define LP_MIN_INTERVAL_S 60
+#define LP_MIN_INTERVAL_S 30
 #endif
 #define LP_MAX_INTERVAL_S 3600
 

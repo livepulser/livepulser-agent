@@ -22,7 +22,6 @@ void lp_guard_record(struct lp_guard *g, int64_t now_ms);
 int64_t lp_backoff_ms(int failures);
 int64_t lp_window_length_ms(int interval_s);
 enum lp_window_status lp_window_check(int interval_s, const struct lp_clock *start, const struct lp_clock *end, int64_t *duration_ms);
-bool lp_retry_allowed(int interval_s, int64_t delay_ms, int64_t sample_age_ms);
 const char *lp_window_status_text(enum lp_window_status s);
 
 #endif

@@ -1,4 +1,4 @@
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 
@@ -13,7 +13,7 @@ LDFLAGS += $(ARCHFLAGS)
 HARDEN = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
 SANITIZE = -fsanitize=address,undefined -fno-omit-frame-pointer
 
-CORE = src/config.c src/log.c src/metrics.c src/options.c src/policy.c src/procfs.c src/protocol.c src/state.c src/util.c
+CORE = src/config.c src/log.c src/metrics.c src/options.c src/policy.c src/procfs.c src/protocol.c src/rules.c src/state.c src/util.c
 AGENT = src/collector.c src/main.c
 
 ifeq ($(TARGET),windows)

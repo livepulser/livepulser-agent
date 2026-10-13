@@ -14,6 +14,8 @@ struct lp_response {
 	char etag[LP_ETAG_SIZE];
 	int64_t retry_after_ms;
 	int64_t server_date;
+	int64_t config_version;
+	char conflict[16];
 	const char *body;
 	size_t body_len;
 	bool body_overflow;

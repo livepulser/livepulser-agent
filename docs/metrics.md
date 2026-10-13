@@ -1,6 +1,6 @@
 # Metric definitions
 
-All metrics describe the host the agent runs on. A report covers one window, from the previous measurement to the current one:
+All metrics describe the host the agent runs on. Each sample covers one window of `sample_seconds` (10 s by default), from the previous measurement to the current one:
 
 - CPU and network are rates over the window.
 - Memory, swap and disk are snapshots taken at the end of the window.
@@ -82,7 +82,7 @@ The selection is rechecked every five minutes and whenever the configuration cha
 
 A whole window is discarded, and a fresh baseline taken, in any of these cases:
 
-- its length is outside 0.5×–1.5× the configured interval, or longer than one hour;
+- its length is outside 0.5×–1.5× the sample interval;
 - the host slept during it;
 - the wall clock jumped by more than five seconds relative to the monotonic clock;
-- the interval, disk path, interface or paused state changed.
+- the sample interval, disk path, interface or paused state changed.

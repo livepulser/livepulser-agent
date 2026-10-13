@@ -12,6 +12,7 @@
 #include "platform.h"
 #include "policy.h"
 #include "protocol.h"
+#include "rules.h"
 #include "service.h"
 #include "state.h"
 #include "transport.h"
@@ -35,21 +36,20 @@ struct agent {
 	struct lp_counters baseline;
 	int64_t window_end_ms;
 
+	struct lp_sample batch[LP_MAX_SAMPLES];
+	size_t batch_count;
+	struct lp_rules rules;
+	int64_t next_upload_ms;
+	int64_t event_at[4];
+
 	int64_t send_after_ms;
 	int send_failures;
 	int rejections;
-	struct lp_guard telemetry_guard;
 	bool auth_failed;
-	bool conflict_check;
-	int64_t conflict_version;
 	int64_t conflict_since_ms;
 	bool session_renewed;
 	bool reported_once;
-
-	bool pending;
-	int64_t retry_at_ms;
-	int64_t observed_real_ms;
-	char body[2048];
+	char body[LP_MAX_REPORT_BYTES + 1];
 	size_t body_len;
 };
 
@@ -63,15 +63,12 @@ static int64_t max64(int64_t a, int64_t b)
 	return a > b ? a : b;
 }
 
-static void drop_window(struct agent *a)
-{
-	a->window_open = false;
-	a->pending = false;
-}
-
+/* Changes arrive through LP-Config-Version on every upload; polling is only a safety net. */
 static void schedule_config(struct agent *a, int64_t now)
 {
-	a->next_config_ms = now + lp_seconds(300) + lp_jitter_ms(lp_seconds(30));
+	int64_t period = a->have_config && !a->cfg.active ? 60 : 3600;
+
+	a->next_config_ms = now + lp_seconds(period) + lp_jitter_ms(lp_seconds(30));
 }
 
 static void config_failed(struct agent *a, int64_t now, const char *why)
@@ -81,54 +78,30 @@ static void config_failed(struct agent *a, int64_t now, const char *why)
 	lp_log(a->config_failures == 1 ? LP_WARN : LP_DEBUG, "configuration request failed: %s", why);
 }
 
-static void resolve_conflict(struct agent *a, const struct lp_config *c, int64_t now)
-{
-	if (!a->conflict_check)
-		return;
-	a->conflict_check = false;
-	if (c->config_version != a->conflict_version)
-		return;
-	/*
-	 * A conflict that outlasts the offline lease means the server retired this session (another
-	 * agent took over and stopped) or holds a newer sequence. Start one new session per process so
-	 * two hosts sharing a key cannot keep displacing each other.
-	 */
-	if (!a->session_renewed && now - a->conflict_since_ms >= lp_seconds(c->offline_after_s) + (int64_t)c->interval_s * 1000) {
-		char err[160];
-		if (lp_state_new_session(&a->state, err, sizeof err) == 0) {
-			a->session_renewed = true;
-			lp_log(LP_WARN, "the server no longer accepts this agent session; starting a new session");
-			return;
-		}
-		lp_log(LP_ERR, "%s", err);
-	}
-	a->send_failures++;
-	a->send_after_ms = now + max64(lp_backoff_ms(a->send_failures), lp_seconds(c->offline_after_s));
-	lp_log(LP_WARN, a->session_renewed ? "telemetry conflict persists after starting a new session; check that no other agent uses this monitor"
-					   : "telemetry conflict with unchanged configuration; another agent may be using this monitor");
-}
-
 static void apply_config(struct agent *a, const struct lp_config *c, const char *etag, int64_t now)
 {
 	bool first = !a->have_config;
-	bool reset = first || lp_config_changes_window(&a->cfg, c);
 
 	if (first) {
-		lp_log(LP_INFO, "configuration loaded: version %lld, interval %ds, %s", (long long)c->config_version,
-		       c->interval_s, c->active ? "active" : "paused");
+		lp_log(LP_INFO, "configuration loaded: version %lld, upload every %ds, sample every %ds, %s",
+		       (long long)c->config_version, c->interval_s, c->sample_s, c->active ? "active" : "paused");
 	} else if (c->config_version != a->cfg.config_version) {
 		lp_log(LP_INFO, "configuration updated to version %lld", (long long)c->config_version);
-		a->pending = false;
 	}
 	if (!first && a->cfg.active != c->active)
-		lp_log(LP_INFO, c->active ? "monitor resumed; starting a new sample window" : "monitor paused; telemetry suspended");
+		lp_log(LP_INFO, c->active ? "monitor resumed; sampling again" : "monitor paused; telemetry suspended");
 	if (!c->disk_path_valid)
-		lp_log(LP_WARN, "configured disk path is not an absolute path; disk usage is unavailable");
-	if (reset) {
-		drop_window(a);
+		lp_log(LP_WARN, "configured disk path is not valid on this system; disk usage is unavailable");
+	if (first || lp_config_changes_window(&a->cfg, c)) {
+		a->window_open = false;
 		a->force_select = true;
 	}
-	resolve_conflict(a, c, now);
+	if (!c->active) {
+		a->batch_count = 0;
+		memset(&a->rules, 0, sizeof a->rules);
+	}
+	if (first || c->interval_s != a->cfg.interval_s || (c->active && !a->cfg.active))
+		a->next_upload_ms = now + (int64_t)c->interval_s * 1000;
 	a->cfg = *c;
 	a->have_config = true;
 	snprintf(a->etag, sizeof a->etag, "%s", etag);
@@ -176,7 +149,6 @@ static int refresh_config(struct agent *a, int64_t now)
 			config_failed(a, now, "unexpected 304 response");
 			return 0;
 		}
-		resolve_conflict(a, &a->cfg, now);
 		a->config_failures = 0;
 		schedule_config(a, now);
 		return 0;
@@ -185,7 +157,7 @@ static int refresh_config(struct agent *a, int64_t now)
 		if (!a->have_config)
 			return LP_EXIT_AUTH;
 		a->auth_failed = true;
-		drop_window(a);
+		a->window_open = false;
 		return 0;
 	case 429:
 		a->next_config_ms = now + max64(r.retry_after_ms, lp_seconds(60)) + lp_jitter_ms(lp_seconds(5));
@@ -204,63 +176,80 @@ static void delay_telemetry(struct agent *a, int64_t now, int64_t server_ms)
 	a->send_after_ms = now + max64(lp_backoff_ms(a->send_failures), server_ms);
 }
 
-static void handle_telemetry(struct agent *a, const struct lp_response *r, bool retry)
+/*
+ * A conflict that outlasts the offline lease means the server retired this session (another
+ * agent took over and stopped) or holds a newer sequence. Start one new session per process so
+ * two hosts sharing a key cannot keep displacing each other.
+ */
+static void handle_conflict(struct agent *a, const struct lp_response *r, int64_t now)
+{
+	if (!a->conflict_since_ms) {
+		a->conflict_since_ms = now;
+		lp_log(LP_WARN, "telemetry conflict (%s); another agent may be using this monitor", r->conflict[0] ? r->conflict : "unspecified");
+	}
+	if (!a->session_renewed && now - a->conflict_since_ms >= lp_seconds(a->cfg.offline_after_s) + (int64_t)a->cfg.interval_s * 1000) {
+		char err[160];
+		if (lp_state_new_session(&a->state, err, sizeof err) == 0) {
+			a->session_renewed = true;
+			a->conflict_since_ms = 0;
+			lp_log(LP_WARN, "the server no longer accepts this agent session; starting a new session");
+			return;
+		}
+		lp_log(LP_ERR, "%s", err);
+	}
+	delay_telemetry(a, now, 0);
+}
+
+static void handle_telemetry(struct agent *a, const struct lp_response *r, size_t sent)
 {
 	int64_t now = lp_mono_ms();
 
+	if (!r->transport_error && r->config_version > 0 && r->config_version != a->cfg.config_version)
+		a->next_config_ms = min64(a->next_config_ms, now);
 	if (r->transport_error || r->status >= 500) {
 		if (r->transport_error)
-			lp_log(r->tls_error ? LP_ERR : LP_WARN, "report not delivered: %s", r->error);
+			lp_log(r->tls_error ? LP_ERR : LP_WARN, "upload failed: %s", r->error);
 		else
-			lp_log(LP_WARN, "report not accepted: HTTP %ld", r->status);
+			lp_log(LP_WARN, "upload not accepted: HTTP %ld", r->status);
 		delay_telemetry(a, now, r->retry_after_ms);
-		if (!retry) {
-			struct lp_clock c;
-			int64_t delay = a->send_after_ms - now;
-			lp_clock_now(&c);
-			a->pending = lp_retry_allowed(a->cfg.interval_s, delay, c.real_ms - a->observed_real_ms + delay);
-			a->retry_at_ms = a->send_after_ms;
-		}
 		return;
 	}
-	a->pending = false;
 	switch (r->status) {
 	case 202:
 		if (!a->reported_once || a->send_failures || a->rejections)
-			lp_log(LP_INFO, "report accepted");
+			lp_log(LP_INFO, "upload accepted");
 		a->reported_once = true;
 		a->send_failures = 0;
 		a->rejections = 0;
 		a->conflict_since_ms = 0;
+		memmove(a->batch, a->batch + sent, (a->batch_count - sent) * sizeof a->batch[0]);
+		a->batch_count -= sent;
 		return;
 	case 401:
 		lp_log(LP_ERR, "API key was rejected; replace the key file, then reload or restart the agent");
 		a->auth_failed = true;
-		drop_window(a);
+		a->window_open = false;
+		a->batch_count = 0;
 		return;
 	case 403:
 		lp_log(LP_INFO, "telemetry refused; the monitor is paused or not provisioned");
 		a->next_config_ms = min64(a->next_config_ms, now);
+		a->batch_count = 0;
 		delay_telemetry(a, now, 0);
 		return;
 	case 409:
-		lp_log(LP_INFO, "telemetry conflict; refreshing configuration");
-		if (!a->conflict_since_ms)
-			a->conflict_since_ms = now;
-		if (!a->conflict_check) {
-			a->conflict_check = true;
-			a->conflict_version = a->cfg.config_version;
-			a->next_config_ms = min64(a->next_config_ms, now);
-		}
+		handle_conflict(a, r, now);
 		return;
 	case 413:
 	case 422:
 		a->rejections++;
-		if (r->server_date && llabs(r->server_date - a->observed_real_ms / 1000) > 60)
-			lp_log(LP_WARN, "report rejected (HTTP %ld): system clock differs from the server by %llds; check time synchronization",
-			       r->status, (long long)(a->observed_real_ms / 1000 - r->server_date));
+		if (r->server_date && a->batch_count &&
+		    llabs(r->server_date - a->batch[a->batch_count - 1].end_ms / 1000) > 60)
+			lp_log(LP_WARN, "upload rejected (HTTP %ld): system clock differs from the server by %llds; check time synchronization",
+			       r->status, (long long)(a->batch[a->batch_count - 1].end_ms / 1000 - r->server_date));
 		else
-			lp_log(LP_WARN, "report rejected (HTTP %ld); the agent may be incompatible with the server", r->status);
+			lp_log(LP_WARN, "upload rejected (HTTP %ld): %.200s", r->status, r->body_len ? r->body : "invalid payload");
+		a->batch_count = 0;
 		if (a->rejections >= 3)
 			delay_telemetry(a, now, 0);
 		return;
@@ -269,34 +258,24 @@ static void handle_telemetry(struct agent *a, const struct lp_response *r, bool 
 		a->send_after_ms = now + max64(r->retry_after_ms, lp_seconds(60)) + lp_jitter_ms(lp_seconds(5));
 		return;
 	default:
-		lp_log(LP_WARN, r->status >= 300 && r->status < 400 ? "report refused: HTTP %ld redirect; check endpoint" : "report refused: HTTP %ld",
+		lp_log(LP_WARN, r->status >= 300 && r->status < 400 ? "upload refused: HTTP %ld redirect; check endpoint" : "upload refused: HTTP %ld",
 		       r->status);
 		delay_telemetry(a, now, 0);
 		return;
 	}
 }
 
-static void send_body(struct agent *a, bool retry)
+/* Uploads every buffered sample. Failed uploads keep the samples for the next attempt. */
+static void upload(struct agent *a, const char *trigger)
 {
+	struct lp_report rep = {.config_version = a->cfg.config_version, .trigger = trigger, .arch = lp_arch(),
+				.samples = a->batch, .count = a->batch_count};
 	struct lp_response r;
-
-	lp_guard_record(&a->telemetry_guard, lp_mono_ms());
-	lp_send_report(a->http, a->body, a->body_len, &r);
-	handle_telemetry(a, &r, retry);
-}
-
-static void submit(struct agent *a, const struct lp_metrics *m, int64_t duration_ms, int64_t observed_real_ms)
-{
-	struct lp_report rep = {.config_version = a->cfg.config_version, .observed_unix_ms = observed_real_ms,
-				.duration_ms = duration_ms, .arch = lp_arch(), .metrics = *m};
 	int64_t now = lp_mono_ms();
 	char err[160];
 
-	a->pending = false;
-	if (now < a->send_after_ms || lp_guard_next(&a->telemetry_guard, now) > now) {
-		lp_log(LP_DEBUG, "sample skipped while backing off");
+	if (a->batch_count == 0 || now < a->send_after_ms)
 		return;
-	}
 	if (lp_state_take_sequence(&a->state, &rep.sequence, err, sizeof err) != 0) {
 		lp_log(LP_ERR, "%s; not sending until the sequence can be reserved", err);
 		delay_telemetry(a, now, 0);
@@ -304,15 +283,37 @@ static void submit(struct agent *a, const struct lp_metrics *m, int64_t duration
 	}
 	memcpy(rep.boot_id, a->state.boot_id, sizeof rep.boot_id);
 	if (lp_report_write(&rep, a->body, sizeof a->body, &a->body_len) != 0) {
-		lp_log(LP_ERR, "cannot serialize report");
+		lp_log(LP_ERR, "cannot serialize upload; dropping %lu samples", (unsigned long)a->batch_count);
+		a->batch_count = 0;
 		return;
 	}
-	a->observed_real_ms = observed_real_ms;
-	lp_log(LP_DEBUG, "sample %lld: cpu %.2f memory %.2f disk %.2f swap %.2f tx %.0f rx %.0f (unavailable as -1)",
-	       (long long)rep.sequence, m->ok[LP_M_CPU] ? m->value[LP_M_CPU] : -1, m->ok[LP_M_MEMORY] ? m->value[LP_M_MEMORY] : -1,
-	       m->ok[LP_M_DISK] ? m->value[LP_M_DISK] : -1, m->ok[LP_M_SWAP] ? m->value[LP_M_SWAP] : -1,
-	       m->ok[LP_M_NET_TX] ? m->value[LP_M_NET_TX] : -1, m->ok[LP_M_NET_RX] ? m->value[LP_M_NET_RX] : -1);
-	send_body(a, false);
+	lp_log(LP_DEBUG, "uploading %lu samples (%s, sequence %lld)", (unsigned long)a->batch_count, trigger, (long long)rep.sequence);
+	lp_send_report(a->http, a->body, a->body_len, &r);
+	handle_telemetry(a, &r, rep.count);
+}
+
+/* Breach and recovery uploads are limited to four per minute, like the server's allowance. */
+static bool event_allowed(struct agent *a, int64_t now)
+{
+	int oldest = 0;
+
+	for (int i = 1; i < 4; i++) {
+		if (a->event_at[i] < a->event_at[oldest])
+			oldest = i;
+	}
+	if (a->event_at[oldest] && now - a->event_at[oldest] < lp_seconds(60))
+		return false;
+	a->event_at[oldest] = now;
+	return true;
+}
+
+static void push_sample(struct agent *a, const struct lp_sample *s)
+{
+	if (a->batch_count == LP_MAX_SAMPLES) {
+		memmove(a->batch, a->batch + 1, (LP_MAX_SAMPLES - 1) * sizeof a->batch[0]);
+		a->batch_count--;
+	}
+	a->batch[a->batch_count++] = *s;
 }
 
 static void open_window(struct agent *a)
@@ -321,22 +322,33 @@ static void open_window(struct agent *a)
 	a->force_select = false;
 	lp_collect_counters(&a->collector, &a->baseline);
 	a->window_open = true;
-	a->window_end_ms = a->baseline.clock.mono_ms + lp_window_length_ms(a->cfg.interval_s);
+	a->window_end_ms = a->baseline.clock.mono_ms + lp_window_length_ms(a->cfg.sample_s);
 }
 
 static void close_window(struct agent *a)
 {
 	struct lp_counters end;
-	struct lp_metrics m;
-	int64_t duration, len = lp_window_length_ms(a->cfg.interval_s);
+	struct lp_sample smp;
+	int64_t duration, len = lp_window_length_ms(a->cfg.sample_s);
 	enum lp_window_status status;
+	enum lp_rule_event event = LP_RULE_NONE;
 
 	lp_collect_counters(&a->collector, &end);
-	status = lp_window_check(a->cfg.interval_s, &a->baseline.clock, &end.clock, &duration);
-	if (status == LP_WINDOW_OK)
-		lp_collect_metrics(&a->cfg, &a->baseline, &end, duration, &m);
-	else
+	status = lp_window_check(a->cfg.sample_s, &a->baseline.clock, &end.clock, &duration);
+	if (status == LP_WINDOW_OK) {
+		const struct lp_metrics *m = &smp.metrics;
+		lp_collect_metrics(&a->cfg, &a->baseline, &end, duration, &smp.metrics);
+		smp.end_ms = end.clock.real_ms;
+		smp.duration_ms = duration;
+		push_sample(a, &smp);
+		event = lp_rules_feed(&a->rules, &a->cfg, &smp);
+		lp_log(LP_DEBUG, "sample: cpu %.2f memory %.2f disk %.2f swap %.2f tx %.0f rx %.0f (unavailable as -1)",
+		       m->ok[LP_M_CPU] ? m->value[LP_M_CPU] : -1, m->ok[LP_M_MEMORY] ? m->value[LP_M_MEMORY] : -1,
+		       m->ok[LP_M_DISK] ? m->value[LP_M_DISK] : -1, m->ok[LP_M_SWAP] ? m->value[LP_M_SWAP] : -1,
+		       m->ok[LP_M_NET_TX] ? m->value[LP_M_NET_TX] : -1, m->ok[LP_M_NET_RX] ? m->value[LP_M_NET_RX] : -1);
+	} else {
 		lp_log(status == LP_WINDOW_TOO_LONG ? LP_INFO : LP_WARN, "discarding sample: %s", lp_window_status_text(status));
+	}
 
 	if (status == LP_WINDOW_OK && end.clock.mono_ms - a->window_end_ms < 1000)
 		a->window_end_ms += len;
@@ -349,20 +361,12 @@ static void close_window(struct agent *a)
 		a->baseline = end;
 	}
 
-	if (status == LP_WINDOW_OK)
-		submit(a, &m, duration, end.clock.real_ms);
-}
-
-static void retry_pending(struct agent *a)
-{
-	struct lp_clock now;
-
-	a->pending = false;
-	lp_clock_now(&now);
-	if (now.real_ms - a->observed_real_ms > 240000 || lp_guard_next(&a->telemetry_guard, now.mono_ms) > now.mono_ms)
-		return;
-	lp_log(LP_DEBUG, "retrying the last report");
-	send_body(a, true);
+	if (event != LP_RULE_NONE) {
+		const char *trigger = event == LP_RULE_BREACH ? "breach" : "recovery";
+		lp_log(LP_INFO, event == LP_RULE_BREACH ? "threshold breach detected; uploading now" : "metrics recovered; uploading now");
+		if (event_allowed(a, end.clock.mono_ms))
+			upload(a, trigger);
+	}
 }
 
 static void reload_key(struct agent *a)
@@ -410,13 +414,14 @@ static int run(struct agent *a)
 				close_window(a);
 				continue;
 			}
-			if (a->pending && now >= a->retry_at_ms) {
-				retry_pending(a);
+			if (now >= a->next_upload_ms) {
+				a->next_upload_ms += (int64_t)a->cfg.interval_s * 1000;
+				if (a->next_upload_ms <= now)
+					a->next_upload_ms = now + (int64_t)a->cfg.interval_s * 1000;
+				upload(a, "interval");
 				continue;
 			}
-			wake = min64(wake, a->window_end_ms);
-			if (a->pending)
-				wake = min64(wake, a->retry_at_ms);
+			wake = min64(wake, min64(a->window_end_ms, a->next_upload_ms));
 		}
 		lp_wait_until(wake);
 	}
@@ -447,8 +452,10 @@ static int check(struct agent *a)
 		fprintf(stderr, "invalid configuration: %s\n", err);
 		return LP_EXIT_CONFIG;
 	}
-	printf("configuration version %lld\ninterval %ds\nstatus %s\ndisk path %s\nnetwork interface %s\n",
-	       (long long)c.config_version, c.interval_s, c.active ? "active" : "paused",
+	printf("configuration version %lld\nupload interval %ds\nsample interval %ds\nalert after %ds above threshold\n"
+	       "recover after %ds below threshold (margin %g)\nstatus %s\ndisk path %s\nnetwork interface %s\n",
+	       (long long)c.config_version, c.interval_s, c.sample_s, c.breach_s, c.recovery_s, c.recovery_margin,
+	       c.active ? "active" : "paused",
 	       c.disk_path_valid ? c.disk_path : "(invalid)",
 	       c.interface_explicit ? (c.interface_valid ? c.ifname : "(invalid)") : "(default route)");
 	return LP_EXIT_OK;

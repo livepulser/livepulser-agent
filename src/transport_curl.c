@@ -71,6 +71,12 @@ static size_t on_header(char *line, size_t size, size_t nmemb, void *userdata)
 		r->etag[0] = '\0';
 		r->retry_after_ms = -1;
 		r->server_date = 0;
+		r->config_version = 0;
+		r->conflict[0] = '\0';
+	} else if (header_value(line, len, "LP-Config-Version", value, sizeof value)) {
+		r->config_version = strtoll(value, NULL, 10);
+	} else if (header_value(line, len, "LP-Conflict", value, sizeof value)) {
+		snprintf(r->conflict, sizeof r->conflict, "%.15s", value);
 	} else if (header_value(line, len, "ETag", value, sizeof value)) {
 		snprintf(r->etag, sizeof r->etag, "%s", value);
 	} else if (header_value(line, len, "Retry-After", value, sizeof value)) {

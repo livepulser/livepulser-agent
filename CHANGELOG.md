@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-13
+
+### Changed
+
+- Protocol version 2. The agent samples every `sample_seconds` (10 s by default) and uploads batches of up to 60 samples every upload interval (30–3600 s, 60 s by default). Version 1 servers are not supported.
+- Configuration changes are picked up from the `LP-Config-Version` header on upload responses instead of polling every five minutes; the agent polls only once an hour, or every minute while paused.
+- Samples that fail to upload are kept and sent with the next upload instead of being retried as a single report.
+
+### Added
+
+- Local threshold evaluation using the monitor's breach time, recovery time and recovery margin. A breach or recovery uploads immediately (at most four times a minute), so alerts open within the configured breach time.
+- `--check` prints the sample interval and alert timing.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added
@@ -25,5 +38,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Service integration: a hardened systemd unit, a launchd daemon with install and uninstall scripts, and a Windows service (`--service`) with PowerShell install and uninstall scripts.
 - Unit tests with procfs fixtures, and an integration test against a local fake API, run under AddressSanitizer and UndefinedBehaviorSanitizer where available. CI covers Linux (amd64, arm64), macOS (arm64, x86_64) and Windows.
 
-[Unreleased]: https://github.com/livepulser/livepulser-agent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/livepulser/livepulser-agent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/livepulser/livepulser-agent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/livepulser/livepulser-agent/releases/tag/v0.1.0

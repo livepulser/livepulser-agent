@@ -6,29 +6,12 @@
 #include <string.h>
 #include <time.h>
 
+#include "config.h"
 #include "platform.h"
-
-static const char *const metric_names[LP_M_COUNT] = {
-	"cpu_percent",
-	"memory_percent",
-	"disk_percent",
-	"swap_percent",
-	"network_tx_bytes_per_second",
-	"network_rx_bytes_per_second",
-};
 
 const char *lp_metric_name(enum lp_metric m)
 {
-	return metric_names[m];
-}
-
-int lp_format_rfc3339(int64_t unix_ms, char *out, size_t cap)
-{
-	struct tm tm;
-
-	if (!lp_gmtime(unix_ms / 1000, &tm) || strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tm) == 0)
-		return -1;
-	return 0;
+	return lp_metric_names[m];
 }
 
 static bool append(char *buf, size_t cap, size_t *pos, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
@@ -49,49 +32,47 @@ static bool append(char *buf, size_t cap, size_t *pos, const char *fmt, ...)
 	return true;
 }
 
-static bool present(const struct lp_metrics *m, int i)
+bool lp_metric_present(const struct lp_metrics *m, int i)
 {
 	double limit = i < LP_M_NET_TX ? 100.0 : 1e12;
 
 	return m->ok[i] && isfinite(m->value[i]) && m->value[i] >= 0 && m->value[i] <= limit;
 }
 
-/* The process never calls setlocale(), so printf uses the C locale's '.' separator. */
+/*
+ * Samples are written as [end_offset_ms, duration_ms, metrics...] relative to the
+ * first sample's start. The process never calls setlocale(), so printf uses '.'.
+ */
 int lp_report_write(const struct lp_report *r, char *buf, size_t cap, size_t *len)
 {
-	char observed[32];
 	size_t pos = 0;
-	bool first = true, ok;
+	int64_t start;
+	bool ok;
 
-	if (r->sequence < 1 || r->sequence > LP_MAX_SEQUENCE || r->config_version < 1 ||
-	    r->duration_ms < 1000 || r->duration_ms > 3600000 || strlen(r->arch) > 32 ||
-	    lp_format_rfc3339(r->observed_unix_ms, observed, sizeof observed))
+	if (r->count == 0 || r->count > LP_MAX_SAMPLES || r->sequence < 1 || r->sequence > LP_MAX_SEQUENCE ||
+	    r->config_version < 1 || strlen(r->arch) > 32)
 		return -1;
-
+	start = r->samples[0].end_ms - r->samples[0].duration_ms;
 	ok = append(buf, cap, &pos,
-		    "{\"schema_version\":1,\"boot_id\":\"%s\",\"sequence\":%lld,\"config_version\":%lld,"
-		    "\"observed_at\":\"%s\",\"sample_duration_ms\":%lld,"
+		    "{\"schema_version\":2,\"boot_id\":\"%s\",\"sequence\":%lld,\"config_version\":%lld,\"trigger\":\"%s\","
 		    "\"agent\":{\"name\":\"" LP_AGENT_NAME "\",\"version\":\"" LP_VERSION "\",\"os\":\"%s\",\"arch\":\"%s\"},"
-		    "\"metrics\":{",
-		    r->boot_id, (long long)r->sequence, (long long)r->config_version, observed,
-		    (long long)r->duration_ms, lp_os_name(), r->arch);
-
-	for (int i = 0; ok && i < LP_M_COUNT; i++) {
-		const char *sep = i ? "," : "";
-
-		if (!present(&r->metrics, i))
-			ok = append(buf, cap, &pos, "%s\"%s\":null", sep, metric_names[i]);
-		else if (i < LP_M_NET_TX)
-			ok = append(buf, cap, &pos, "%s\"%s\":%.2f", sep, metric_names[i], r->metrics.value[i]);
-		else
-			ok = append(buf, cap, &pos, "%s\"%s\":%.0f", sep, metric_names[i], r->metrics.value[i]);
-	}
-	ok = ok && append(buf, cap, &pos, "},\"unavailable_metrics\":[");
-	for (int i = 0; ok && i < LP_M_COUNT; i++) {
-		if (present(&r->metrics, i))
-			continue;
-		ok = append(buf, cap, &pos, "%s\"%s\"", first ? "" : ",", metric_names[i]);
-		first = false;
+		    "\"start_ms\":%lld,\"samples\":[",
+		    r->boot_id, (long long)r->sequence, (long long)r->config_version, r->trigger, lp_os_name(), r->arch,
+		    (long long)start);
+	for (size_t n = 0; ok && n < r->count; n++) {
+		const struct lp_sample *smp = &r->samples[n];
+		if (smp->duration_ms < 1000 || smp->duration_ms > 3600000 || smp->end_ms - start < smp->duration_ms)
+			return -1;
+		ok = append(buf, cap, &pos, "%s[%lld,%lld", n ? "," : "", (long long)(smp->end_ms - start), (long long)smp->duration_ms);
+		for (int i = 0; ok && i < LP_M_COUNT; i++) {
+			if (!lp_metric_present(&smp->metrics, i))
+				ok = append(buf, cap, &pos, ",null");
+			else if (i < LP_M_NET_TX)
+				ok = append(buf, cap, &pos, ",%.2f", smp->metrics.value[i]);
+			else
+				ok = append(buf, cap, &pos, ",%.0f", smp->metrics.value[i]);
+		}
+		ok = ok && append(buf, cap, &pos, "]");
 	}
 	ok = ok && append(buf, cap, &pos, "]}");
 	if (!ok || pos > LP_MAX_REPORT_BYTES)

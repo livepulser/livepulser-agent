@@ -22,6 +22,7 @@
 #include "policy.h"
 #include "procfs.h"
 #include "protocol.h"
+#include "rules.h"
 #include "state.h"
 
 #ifdef _WIN32
@@ -202,11 +203,16 @@ static void test_disk(void)
 }
 
 static const char *valid_config =
-	"{\"schema_version\":1,\"config_version\":2,\"report_interval_seconds\":60,"
-	"\"settings\":{\"cpu\":80,\"memory\":80,\"disk\":80,\"swap\":80,\"network\":{\"upload\":10240,\"download\":102400},"
+	"{\"schema_version\":2,\"config_version\":2,\"report_interval_seconds\":60,\"sample_seconds\":10,"
+	"\"settings\":{\"cpu\":80,\"memory\":80,\"network\":{\"upload\":10240,\"download\":102400},"
 	"\"disk_path\":\"" TEST_DISK "\",\"network_interface\":\"\"},"
-	"\"thresholds\":{\"cpu_percent\":80},\"breach_reports\":3,\"recovery_reports\":2,"
+	"\"thresholds\":{\"cpu_percent\":80,\"network_rx_bytes_per_second\":102400},"
+	"\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":2},"
 	"\"offline_after_seconds\":210,\"active\":true,\"future_field\":{\"x\":[1,2]}}";
+
+#define CFG(extra) "{\"schema_version\":2,\"config_version\":5,\"report_interval_seconds\":60,\"sample_seconds\":10," \
+	"\"settings\":{},\"thresholds\":{},\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":0}," \
+	"\"active\":true" extra "}"
 
 static enum lp_config_result parse(const char *json, struct lp_config *c)
 {
@@ -220,30 +226,36 @@ static void test_config(void)
 	char big[LP_MAX_CONFIG_BYTES + 2];
 
 	CHECK(parse(valid_config, &c) == LP_CONFIG_OK);
-	CHECK(c.config_version == 2 && c.interval_s == 60 && c.offline_after_s == 210 && c.active);
+	CHECK(c.config_version == 2 && c.interval_s == 60 && c.sample_s == 10 && c.offline_after_s == 210 && c.active);
 	CHECK(strcmp(c.disk_path, TEST_DISK) == 0 && c.disk_path_valid);
 	CHECK(!c.interface_explicit);
+	CHECK(c.has_threshold[0] && c.threshold[0] == 80 && !c.has_threshold[1] && c.has_threshold[5] && c.threshold[5] == 102400);
+	CHECK(c.breach_s == 30 && c.recovery_s == 60 && c.recovery_margin == 2);
 
-	CHECK(parse("{\"schema_version\":1,\"config_version\":5,\"report_interval_seconds\":120,"
-		    "\"settings\":{\"cpu\":90},\"thresholds\":{},\"active\":false}", &d) == LP_CONFIG_OK);
-	CHECK(strcmp(d.disk_path, "/") == 0 && d.offline_after_s == 390 && !d.active);
+	CHECK(parse(CFG(""), &d) == LP_CONFIG_OK);
+	CHECK(strcmp(d.disk_path, "/") == 0 && d.offline_after_s == 210);
+	d.sample_s = 20;
 	CHECK(lp_config_changes_window(&c, &d));
 	d = c;
 	d.config_version = 9;
+	d.threshold[0] = 50;
 	CHECK(!lp_config_changes_window(&c, &d));
 
-	CHECK(parse("{\"schema_version\":1,\"config_version\":5,\"report_interval_seconds\":60,"
-		    "\"settings\":{\"network_interface\":\"bad\\nname\",\"disk_path\":\"relative\"},\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_OK);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":5,\"report_interval_seconds\":60,\"sample_seconds\":10,"
+		    "\"settings\":{\"network_interface\":\"bad\\nname\",\"disk_path\":\"relative\"},\"thresholds\":{},"
+		    "\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":0},\"active\":true}", &d) == LP_CONFIG_OK);
 	CHECK(d.interface_explicit && !d.interface_valid && !d.disk_path_valid);
 
-	CHECK(parse("{\"schema_version\":2,\"config_version\":1}", &d) == LP_CONFIG_UNSUPPORTED);
-	CHECK(parse("{\"schema_version\":1,\"config_version\":0,\"report_interval_seconds\":60,\"settings\":{},\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_INVALID);
-	CHECK(parse("{\"schema_version\":1,\"config_version\":1.5,\"report_interval_seconds\":60,\"settings\":{},\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_INVALID);
-	CHECK(parse("{\"schema_version\":1,\"config_version\":1,\"report_interval_seconds\":3601,\"settings\":{},\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_INVALID);
-	CHECK(parse("{\"schema_version\":1,\"config_version\":1,\"report_interval_seconds\":60,\"settings\":{},\"thresholds\":{},\"active\":1}", &d) == LP_CONFIG_INVALID);
-	CHECK(parse("{\"schema_version\":1,\"config_version\":1,\"report_interval_seconds\":60,\"settings\":[],\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_INVALID);
-	CHECK(parse("{\"schema_version\":1,\"config_version\":1,\"report_interval_seconds\":NaN}", &d) == LP_CONFIG_INVALID);
-	CHECK(parse("{\"schema_version\":1,\"config_version\":1e400}", &d) == LP_CONFIG_INVALID);
+	CHECK(parse("{\"schema_version\":1,\"config_version\":1}", &d) == LP_CONFIG_UNSUPPORTED);
+	CHECK(parse("{\"schema_version\":3,\"config_version\":1}", &d) == LP_CONFIG_UNSUPPORTED);
+	CHECK(parse(CFG(",\"x\":1"), &d) == LP_CONFIG_OK);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":0,\"report_interval_seconds\":60,\"sample_seconds\":10,\"settings\":{},\"thresholds\":{},\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":0},\"active\":true}", &d) == LP_CONFIG_INVALID);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":1,\"report_interval_seconds\":60,\"sample_seconds\":61,\"settings\":{},\"thresholds\":{},\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":0},\"active\":true}", &d) == LP_CONFIG_INVALID);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":1,\"report_interval_seconds\":60,\"sample_seconds\":10,\"settings\":{},\"thresholds\":{},\"active\":true}", &d) == LP_CONFIG_INVALID);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":1,\"report_interval_seconds\":60,\"sample_seconds\":10,\"settings\":{},\"thresholds\":{\"cpu_percent\":\"80\"},\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":0},\"active\":true}", &d) == LP_CONFIG_INVALID);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":1,\"report_interval_seconds\":3601,\"sample_seconds\":10,\"settings\":{},\"thresholds\":{},\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":0},\"active\":true}", &d) == LP_CONFIG_INVALID);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":1,\"report_interval_seconds\":60,\"sample_seconds\":10,\"settings\":{},\"thresholds\":{},\"rules\":{\"breach_seconds\":30,\"recovery_seconds\":60,\"recovery_margin\":0},\"active\":1}", &d) == LP_CONFIG_INVALID);
+	CHECK(parse("{\"schema_version\":2,\"config_version\":1e400}", &d) == LP_CONFIG_INVALID);
 	CHECK(parse("not json", &d) == LP_CONFIG_INVALID);
 	CHECK(parse("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]", &d) == LP_CONFIG_INVALID);
 	memset(big, ' ', sizeof big - 1);
@@ -251,58 +263,110 @@ static void test_config(void)
 	CHECK(parse(big, &d) == LP_CONFIG_INVALID);
 }
 
+static struct lp_sample sample_at(int64_t end_ms, double cpu)
+{
+	struct lp_sample s = {.end_ms = end_ms, .duration_ms = 10000};
+
+	for (int i = 0; i < LP_M_COUNT; i++) {
+		s.metrics.ok[i] = true;
+		s.metrics.value[i] = 10;
+	}
+	s.metrics.value[LP_M_CPU] = cpu;
+	return s;
+}
+
 static void test_report(void)
 {
+	struct lp_sample samples[LP_MAX_SAMPLES];
 	struct lp_report r = {.boot_id = "9d1c5aef-19be-4801-bb24-ac611f4c0d6d", .sequence = 42, .config_version = 2,
-			      .observed_unix_ms = 1791882000000LL, .duration_ms = 60000, .arch = "arm64"};
-	char buf[2048];
+			      .trigger = "interval", .arch = "arm64", .samples = samples, .count = 2};
+	char buf[LP_MAX_REPORT_BYTES + 1];
 	size_t len;
-	cJSON *doc, *metrics, *missing;
+	cJSON *doc, *list, *first;
 
-	r.metrics.ok[LP_M_CPU] = true;
-	r.metrics.value[LP_M_CPU] = 24.5;
-	r.metrics.ok[LP_M_MEMORY] = true;
-	r.metrics.value[LP_M_MEMORY] = 52;
-	r.metrics.ok[LP_M_DISK] = true;
-	r.metrics.value[LP_M_DISK] = NAN;
-	r.metrics.ok[LP_M_NET_TX] = true;
-	r.metrics.value[LP_M_NET_TX] = 1500.4;
-	r.metrics.ok[LP_M_NET_RX] = true;
-	r.metrics.value[LP_M_NET_RX] = 2e12;
+	samples[0] = sample_at(1791882010000LL, 24.5);
+	samples[0].metrics.value[LP_M_DISK] = NAN;
+	samples[0].metrics.ok[LP_M_SWAP] = false;
+	samples[0].metrics.value[LP_M_NET_TX] = 1500.4;
+	samples[0].metrics.value[LP_M_NET_RX] = 2e12;
+	samples[1] = sample_at(1791882020000LL, 30);
 
 	CHECK(lp_report_write(&r, buf, sizeof buf, &len) == 0);
 	CHECK(len == strlen(buf) && len < LP_MAX_REPORT_BYTES);
 	doc = cJSON_Parse(buf);
 	CHECK(doc != NULL);
 	if (doc) {
-		CHECK(cJSON_GetArraySize(doc) == 9);
-		CHECK(strcmp(cJSON_GetObjectItem(doc, "observed_at")->valuestring, "2026-10-13T09:00:00Z") == 0);
-		CHECK(cJSON_GetObjectItem(doc, "sequence")->valuedouble == 42);
-		metrics = cJSON_GetObjectItem(doc, "metrics");
-		missing = cJSON_GetObjectItem(doc, "unavailable_metrics");
-		CHECK(cJSON_GetArraySize(metrics) == 6);
-		CLOSE_TO(cJSON_GetObjectItem(metrics, "cpu_percent")->valuedouble, 24.5);
-		CLOSE_TO(cJSON_GetObjectItem(metrics, "network_tx_bytes_per_second")->valuedouble, 1500);
-		CHECK(cJSON_IsNull(cJSON_GetObjectItem(metrics, "disk_percent")));
-		CHECK(cJSON_IsNull(cJSON_GetObjectItem(metrics, "swap_percent")));
-		CHECK(cJSON_IsNull(cJSON_GetObjectItem(metrics, "network_rx_bytes_per_second")));
-		CHECK(cJSON_GetArraySize(missing) == 3);
-		CHECK(strcmp(cJSON_GetArrayItem(missing, 0)->valuestring, "disk_percent") == 0);
+		CHECK(cJSON_GetArraySize(doc) == 8);
+		CHECK(cJSON_GetObjectItem(doc, "schema_version")->valuedouble == 2);
+		CHECK(cJSON_GetObjectItem(doc, "start_ms")->valuedouble == 1791882000000.0);
+		CHECK(strcmp(cJSON_GetObjectItem(doc, "trigger")->valuestring, "interval") == 0);
+		list = cJSON_GetObjectItem(doc, "samples");
+		CHECK(cJSON_GetArraySize(list) == 2);
+		first = cJSON_GetArrayItem(list, 0);
+		CHECK(cJSON_GetArraySize(first) == 8);
+		CHECK(cJSON_GetArrayItem(first, 0)->valuedouble == 10000 && cJSON_GetArrayItem(first, 1)->valuedouble == 10000);
+		CLOSE_TO(cJSON_GetArrayItem(first, 2)->valuedouble, 24.5);
+		CHECK(cJSON_IsNull(cJSON_GetArrayItem(first, 4)));
+		CHECK(cJSON_IsNull(cJSON_GetArrayItem(first, 5)));
+		CLOSE_TO(cJSON_GetArrayItem(first, 6)->valuedouble, 1500);
+		CHECK(cJSON_IsNull(cJSON_GetArrayItem(first, 7)));
+		CHECK(cJSON_GetArrayItem(cJSON_GetArrayItem(list, 1), 0)->valuedouble == 20000);
 		CHECK(strcmp(cJSON_GetObjectItem(cJSON_GetObjectItem(doc, "agent"), "name")->valuestring, "livepulser-agent") == 0);
 		cJSON_Delete(doc);
 	}
 
-	memset(&r.metrics, 0, sizeof r.metrics);
+	for (int i = 0; i < LP_MAX_SAMPLES; i++) {
+		samples[i] = sample_at(1791882010000LL + i * 10000LL, 99.99);
+		samples[i].metrics.value[LP_M_NET_TX] = samples[i].metrics.value[LP_M_NET_RX] = 999999999999;
+	}
+	r.count = LP_MAX_SAMPLES;
 	CHECK(lp_report_write(&r, buf, sizeof buf, &len) == 0);
-	CHECK(strstr(buf, "\"unavailable_metrics\":[\"cpu_percent\",\"memory_percent\",\"disk_percent\",\"swap_percent\","
-			  "\"network_tx_bytes_per_second\",\"network_rx_bytes_per_second\"]") != NULL);
-
-	CHECK(lp_report_write(&r, buf, 64, &len) == -1);
-	r.duration_ms = 3600001;
+	CHECK(len <= LP_MAX_REPORT_BYTES);
+	r.count = LP_MAX_SAMPLES + 1;
 	CHECK(lp_report_write(&r, buf, sizeof buf, &len) == -1);
-	r.duration_ms = 60000;
+	r.count = 0;
+	CHECK(lp_report_write(&r, buf, sizeof buf, &len) == -1);
+	r.count = 2;
+	CHECK(lp_report_write(&r, buf, 64, &len) == -1);
 	r.sequence = LP_MAX_SEQUENCE + 1;
 	CHECK(lp_report_write(&r, buf, sizeof buf, &len) == -1);
+}
+
+static void test_rules(void)
+{
+	struct lp_config c;
+	struct lp_rules r;
+	struct lp_sample s;
+	int64_t t = 1000000;
+
+	CHECK(parse(valid_config, &c) == LP_CONFIG_OK);
+	c.recovery_margin = 0;
+	memset(&r, 0, sizeof r);
+	s = sample_at(t += 10000, 90);
+	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_NONE);
+	s = sample_at(t += 10000, 90);
+	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_NONE);
+	s = sample_at(t += 10000, 90);
+	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_BREACH);
+	CHECK(r.alerting && r.cause[LP_M_CPU]);
+	s = sample_at(t += 10000, 95);
+	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_NONE);
+	for (int i = 0; i < 5; i++) {
+		s = sample_at(t += 10000, 79);
+		CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_NONE);
+	}
+	s = sample_at(t += 10000, 79);
+	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_RECOVERY);
+	CHECK(!r.alerting);
+	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_NONE);
+
+	memset(&r, 0, sizeof r);
+	s = sample_at(t += 10000, 90);
+	lp_rules_feed(&r, &c, &s);
+	s = sample_at(t += 10000, 90);
+	lp_rules_feed(&r, &c, &s);
+	s = sample_at(t += 60000, 90);
+	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_NONE);
 }
 
 static void test_options(void)
@@ -461,11 +525,6 @@ static void test_policy(void)
 	a.boot_ms = -1;
 	CHECK(lp_window_check(3600, &a, &b, &d) == LP_WINDOW_TOO_LONG);
 
-	CHECK(!lp_retry_allowed(60, 60000, 61000));
-	CHECK(lp_retry_allowed(600, 60000, 61000));
-	CHECK(!lp_retry_allowed(600, 120000, 121000));
-	CHECK(lp_retry_allowed(3600, 120000, 121000));
-	CHECK(!lp_retry_allowed(3600, 240000, 241000));
 }
 
 int main(void)
@@ -493,6 +552,7 @@ int main(void)
 	test_platform();
 	test_config();
 	test_report();
+	test_rules();
 	test_options();
 	test_api_key(dir);
 	test_state(dir);

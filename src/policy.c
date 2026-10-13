@@ -58,15 +58,6 @@ enum lp_window_status lp_window_check(int interval_s, const struct lp_clock *sta
 	return LP_WINDOW_OK;
 }
 
-/*
- * A retry must land before the server would see the next window's report closer than
- * 0.8 x interval, and while observed_at is comfortably inside the 5-minute freshness limit.
- */
-bool lp_retry_allowed(int interval_s, int64_t delay_ms, int64_t sample_age_ms)
-{
-	return delay_ms <= (int64_t)interval_s * 200 - 5000 && sample_age_ms <= 240000;
-}
-
 const char *lp_window_status_text(enum lp_window_status s)
 {
 	switch (s) {

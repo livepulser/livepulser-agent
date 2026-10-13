@@ -7,6 +7,25 @@
 #include "cJSON.h"
 #include "platform.h"
 
+const char *const lp_metric_names[LP_METRIC_COUNT] = {
+	"cpu_percent",
+	"memory_percent",
+	"disk_percent",
+	"swap_percent",
+	"network_tx_bytes_per_second",
+	"network_rx_bytes_per_second",
+};
+
+static bool get_number(const cJSON *obj, const char *key, double min, double max, double *out)
+{
+	const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+
+	if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) || item->valuedouble < min || item->valuedouble > max)
+		return false;
+	*out = item->valuedouble;
+	return true;
+}
+
 static bool get_integer(const cJSON *obj, const char *key, int64_t min, int64_t max, int64_t *out)
 {
 	const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
@@ -24,7 +43,7 @@ static bool get_integer(const cJSON *obj, const char *key, int64_t min, int64_t 
 enum lp_config_result lp_config_parse(const char *json, size_t len, struct lp_config *out, char *err, size_t errlen)
 {
 	enum lp_config_result result = LP_CONFIG_INVALID;
-	const cJSON *settings, *active, *thresholds, *item;
+	const cJSON *settings, *active, *thresholds, *rules, *item;
 	struct lp_config c = {0};
 	int64_t v;
 	cJSON *root;
@@ -42,7 +61,7 @@ enum lp_config_result lp_config_parse(const char *json, size_t len, struct lp_co
 		snprintf(err, errlen, "missing or invalid schema_version");
 		goto done;
 	}
-	if (v != 1) {
+	if (v != 2) {
 		snprintf(err, errlen, "unsupported configuration schema_version %lld", (long long)v);
 		result = LP_CONFIG_UNSUPPORTED;
 		goto done;
@@ -56,6 +75,11 @@ enum lp_config_result lp_config_parse(const char *json, size_t len, struct lp_co
 		goto done;
 	}
 	c.interval_s = (int)v;
+	if (!get_integer(root, "sample_seconds", 1, 60, &v) || v > c.interval_s) {
+		snprintf(err, errlen, "missing or invalid sample_seconds");
+		goto done;
+	}
+	c.sample_s = (int)v;
 	c.offline_after_s = c.interval_s * 3 + 30;
 	if (cJSON_HasObjectItem(root, "offline_after_seconds")) {
 		if (!get_integer(root, "offline_after_seconds", 1, 4 * LP_MAX_INTERVAL_S, &v)) {
@@ -72,8 +96,32 @@ enum lp_config_result lp_config_parse(const char *json, size_t len, struct lp_co
 	c.active = cJSON_IsTrue(active);
 	thresholds = cJSON_GetObjectItemCaseSensitive(root, "thresholds");
 	settings = cJSON_GetObjectItemCaseSensitive(root, "settings");
-	if (!cJSON_IsObject(settings) || !cJSON_IsObject(thresholds)) {
-		snprintf(err, errlen, "missing settings or thresholds object");
+	rules = cJSON_GetObjectItemCaseSensitive(root, "rules");
+	if (!cJSON_IsObject(settings) || !cJSON_IsObject(thresholds) || !cJSON_IsObject(rules)) {
+		snprintf(err, errlen, "missing settings, thresholds or rules object");
+		goto done;
+	}
+	for (int i = 0; i < LP_METRIC_COUNT; i++) {
+		if (!cJSON_HasObjectItem(thresholds, lp_metric_names[i]))
+			continue;
+		if (!get_number(thresholds, lp_metric_names[i], 0, 1e12, &c.threshold[i])) {
+			snprintf(err, errlen, "invalid threshold for %s", lp_metric_names[i]);
+			goto done;
+		}
+		c.has_threshold[i] = true;
+	}
+	if (!get_integer(rules, "breach_seconds", 1, 3600, &v)) {
+		snprintf(err, errlen, "invalid rules.breach_seconds");
+		goto done;
+	}
+	c.breach_s = (int)v;
+	if (!get_integer(rules, "recovery_seconds", 1, 3600, &v)) {
+		snprintf(err, errlen, "invalid rules.recovery_seconds");
+		goto done;
+	}
+	c.recovery_s = (int)v;
+	if (!get_number(rules, "recovery_margin", 0, 100, &c.recovery_margin)) {
+		snprintf(err, errlen, "invalid rules.recovery_margin");
 		goto done;
 	}
 
@@ -117,7 +165,7 @@ done:
 
 bool lp_config_changes_window(const struct lp_config *old, const struct lp_config *new)
 {
-	return old->interval_s != new->interval_s || old->active != new->active ||
+	return old->sample_s != new->sample_s || old->active != new->active ||
 	       old->disk_path_valid != new->disk_path_valid || strcmp(old->disk_path, new->disk_path) != 0 ||
 	       old->interface_explicit != new->interface_explicit || old->interface_valid != new->interface_valid ||
 	       strcmp(old->ifname, new->ifname) != 0;

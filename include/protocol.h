@@ -18,18 +18,24 @@ struct lp_metrics {
 	double value[LP_M_COUNT];
 };
 
+struct lp_sample {
+	int64_t end_ms;
+	int64_t duration_ms;
+	struct lp_metrics metrics;
+};
+
 struct lp_report {
 	char boot_id[LP_UUID_LEN + 1];
 	int64_t sequence;
 	int64_t config_version;
-	int64_t observed_unix_ms;
-	int64_t duration_ms;
+	const char *trigger;
 	const char *arch;
-	struct lp_metrics metrics;
+	const struct lp_sample *samples;
+	size_t count;
 };
 
+bool lp_metric_present(const struct lp_metrics *m, int i);
 const char *lp_metric_name(enum lp_metric m);
-int lp_format_rfc3339(int64_t unix_ms, char *out, size_t cap);
 int lp_report_write(const struct lp_report *r, char *buf, size_t cap, size_t *len);
 
 #endif

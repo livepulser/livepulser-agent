@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.livepulser.agent</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/livepulser-agent</string>
+		<string>--config</string>
+		<string>/usr/local/etc/livepulser-agent/agent.conf</string>
+		<string>--log-file</string>
+		<string>/usr/local/var/livepulser-agent/agent.log</string>
+	</array>
+	<key>UserName</key>
+	<string>_livepulser</string>
+	<key>GroupName</key>
+	<string>_livepulser</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+</dict>
+</plist>

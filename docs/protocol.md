@@ -84,6 +84,7 @@ The server evaluates alerts from the samples; the agent runs the same rule local
 
 - A metric **breaches** once it has stayed at or above its threshold for `breach_seconds`.
 - An alert **recovers** once every metric that caused it has stayed at or below its recovery level for `recovery_seconds`. The recovery level is `threshold − recovery_margin` for percentages and `threshold × (1 − recovery_margin / 100)` for network rates. Metrics that did not cause the alert never block recovery.
+- A configuration change keeps an open alert, but restarts the timers of any metric whose threshold changed, and every recovery timer when `recovery_margin` changes.
 - A gap in samples (for example after the host slept) restarts the timers.
 - If no upload arrives for `offline_after_seconds` (3 × upload interval + 30 s), the server marks the agent offline; the next upload closes an offline-only incident.
 

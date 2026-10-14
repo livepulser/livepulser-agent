@@ -25,6 +25,8 @@ enum lp_rule_event {
 };
 
 void lp_rules_reset(struct lp_rules *r);
+/* Restarts timers whose threshold or recovery level changed; the alert and its causes are kept. */
+void lp_rules_rebase(struct lp_rules *r, const struct lp_config *old, const struct lp_config *c);
 enum lp_rule_event lp_rules_feed(struct lp_rules *r, const struct lp_config *c, const struct lp_sample *s);
 
 #endif

@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Changing a metric's threshold restarts its breach and recovery timers, and changing the recovery margin restarts recovery timers, so time measured under the old rule no longer counts toward the new one. An open alert is kept.
+
 ## [0.2.0] - 2026-10-13
 
 ### Changed

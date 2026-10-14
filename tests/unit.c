@@ -367,6 +367,38 @@ static void test_rules(void)
 	lp_rules_feed(&r, &c, &s);
 	s = sample_at(t += 60000, 90);
 	CHECK(lp_rules_feed(&r, &c, &s) == LP_RULE_NONE);
+
+	/* Time above an old threshold does not count toward a new one. */
+	struct lp_config raised = c;
+	raised.threshold[LP_M_CPU] = 90;
+	memset(&r, 0, sizeof r);
+	s = sample_at(t += 10000, 85);
+	lp_rules_feed(&r, &c, &s);
+	s = sample_at(t += 10000, 85);
+	lp_rules_feed(&r, &c, &s);
+	lp_rules_rebase(&r, &c, &raised);
+	s = sample_at(t += 10000, 95);
+	CHECK(lp_rules_feed(&r, &raised, &s) == LP_RULE_NONE);
+	s = sample_at(t += 10000, 95);
+	CHECK(lp_rules_feed(&r, &raised, &s) == LP_RULE_NONE);
+	s = sample_at(t += 10000, 95);
+	CHECK(lp_rules_feed(&r, &raised, &s) == LP_RULE_BREACH);
+
+	/* A margin change restarts recovery but keeps the alert. */
+	struct lp_config margin = raised;
+	margin.recovery_margin = 5;
+	for (int i = 0; i < 3; i++) {
+		s = sample_at(t += 10000, 70);
+		CHECK(lp_rules_feed(&r, &raised, &s) == LP_RULE_NONE);
+	}
+	lp_rules_rebase(&r, &raised, &margin);
+	CHECK(r.alerting && r.cause[LP_M_CPU] && !r.below_since[LP_M_CPU]);
+	for (int i = 0; i < 5; i++) {
+		s = sample_at(t += 10000, 70);
+		CHECK(lp_rules_feed(&r, &margin, &s) == LP_RULE_NONE);
+	}
+	s = sample_at(t += 10000, 70);
+	CHECK(lp_rules_feed(&r, &margin, &s) == LP_RULE_RECOVERY);
 }
 
 static void test_options(void)

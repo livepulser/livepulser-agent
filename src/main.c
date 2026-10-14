@@ -99,6 +99,8 @@ static void apply_config(struct agent *a, const struct lp_config *c, const char 
 	if (!c->active) {
 		a->batch_count = 0;
 		memset(&a->rules, 0, sizeof a->rules);
+	} else if (!first) {
+		lp_rules_rebase(&a->rules, &a->cfg, c);
 	}
 	if (first || c->interval_s != a->cfg.interval_s || (c->active && !a->cfg.active))
 		a->next_upload_ms = 0;

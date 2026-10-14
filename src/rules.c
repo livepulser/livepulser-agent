@@ -13,6 +13,18 @@ void lp_rules_reset(struct lp_rules *r)
 	memcpy(r->cause, cause, sizeof cause);
 }
 
+void lp_rules_rebase(struct lp_rules *r, const struct lp_config *old, const struct lp_config *c)
+{
+	bool margin = old->recovery_margin != c->recovery_margin;
+
+	for (int i = 0; i < LP_M_COUNT; i++) {
+		if (old->has_threshold[i] != c->has_threshold[i] || old->threshold[i] != c->threshold[i])
+			r->above_since[i] = r->below_since[i] = 0;
+		else if (margin)
+			r->below_since[i] = 0;
+	}
+}
+
 static double recovery_level(const struct lp_config *c, int i)
 {
 	if (i >= LP_M_NET_TX)

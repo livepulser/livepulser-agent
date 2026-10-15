@@ -45,7 +45,7 @@ Content-Type: application/json
   "sequence": 42,
   "config_version": 12,
   "trigger": "interval",
-  "agent": {"name": "livepulser-agent", "version": "0.2.0", "os": "linux", "arch": "amd64"},
+  "agent": {"name": "livepulser-agent", "version": "0.2.1", "os": "linux", "arch": "amd64"},
   "start_ms": 1791882000000,
   "samples": [
     [10000, 10000, 24.5, 52.0, 41.5, null, 1500, 3500],

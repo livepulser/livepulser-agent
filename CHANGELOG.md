@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-15
+
 ### Fixed
 
 - Changing a metric's threshold restarts its breach and recovery timers, and changing the recovery margin restarts recovery timers, so time measured under the old rule no longer counts toward the new one. An open alert is kept.
@@ -42,6 +44,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Service integration: a hardened systemd unit, a launchd daemon with install and uninstall scripts, and a Windows service (`--service`) with PowerShell install and uninstall scripts.
 - Unit tests with procfs fixtures, and an integration test against a local fake API, run under AddressSanitizer and UndefinedBehaviorSanitizer where available. CI covers Linux (amd64, arm64), macOS (arm64, x86_64) and Windows.
 
-[Unreleased]: https://github.com/livepulser/livepulser-agent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/livepulser/livepulser-agent/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/livepulser/livepulser-agent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/livepulser/livepulser-agent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/livepulser/livepulser-agent/releases/tag/v0.1.0

@@ -7,7 +7,7 @@
 
 #define LP_AGENT_NAME "livepulser-agent"
 #ifndef LP_VERSION
-#define LP_VERSION "0.2.0"
+#define LP_VERSION "0.2.1"
 #endif
 
 enum {

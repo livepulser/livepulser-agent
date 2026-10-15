@@ -322,9 +322,15 @@ def main():
         if FIXTURE:
             assert abs(cpu - 30.0) < 3, s
             assert abs(mem - 25.0) < 0.01 and abs(swap - 25.0) < 0.01, s
-            assert 500 <= tx <= 1500 and 1000 <= rx <= 3000, s
         else:
             assert cpu is not None and mem is not None and tx is not None and rx is not None, s
+    if FIXTURE:
+        # The fixture rewrites counters from a thread that can lag on slow hosts, which
+        # shifts bytes between neighbouring samples, so check the duration-weighted rate.
+        span = sum(s[1] for s in samples)
+        tx = sum(s[6] * s[1] for s in samples) / span
+        rx = sum(s[7] * s[1] for s in samples) / span
+        assert 700 <= tx <= 1300 and 1400 <= rx <= 2600, samples
     gaps = [b["time"] - a["time"] for a, b in zip(first, first[1:])]
     if not all(INTERVAL * 0.8 <= g <= INTERVAL * 1.4 for g in gaps):
         statuses = [(r["kind"], r["status"], r["body"]["trigger"] if r["body"] else None) for r in API.log]

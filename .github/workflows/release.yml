@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev
+      - run: make test
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make clean && make VERSION="$version"
+          name="livepulser-agent-${version}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$name"
+          strip -o "dist/$name/livepulser-agent" build/livepulser-agent
+          cp README.md CHANGELOG.md LICENSE packaging/agent.conf.example packaging/systemd/livepulser-agent.service "dist/$name/"
+          cp third_party/cjson/LICENSE "dist/$name/LICENSE.cjson"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - run: make test
+      - name: Package universal binary
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make clean && make VERSION="$version" ARCHFLAGS="-arch arm64 -arch x86_64"
+          name="livepulser-agent-${version}-macos-universal"
+          mkdir -p "dist/$name"
+          strip -o "dist/$name/livepulser-agent" build/livepulser-agent
+          # Apple silicon only runs signed code; stripping drops the linker's ad-hoc signature.
+          codesign --force --sign - "dist/$name/livepulser-agent"
+          cp README.md CHANGELOG.md LICENSE packaging/agent.conf.example "dist/$name/"
+          cp packaging/macos/com.livepulser.agent.plist packaging/macos/install.sh packaging/macos/uninstall.sh "dist/$name/"
+          cp third_party/cjson/LICENSE "dist/$name/LICENSE.cjson"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.tar.gz
+
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 zip
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make CC=x86_64-w64-mingw32-gcc VERSION="$version"
+          name="livepulser-agent-${version}-windows-amd64"
+          mkdir -p "dist/$name"
+          x86_64-w64-mingw32-strip -o "dist/$name/livepulser-agent.exe" build/livepulser-agent.exe
+          cp README.md CHANGELOG.md LICENSE packaging/agent.conf.example packaging/windows/install.ps1 packaging/windows/uninstall.ps1 "dist/$name/"
+          cp third_party/cjson/LICENSE "dist/$name/LICENSE.cjson"
+          (cd dist && zip -qr "$name.zip" "$name")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: dist/*.zip
+
+  publish:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "See CHANGELOG.md for details." *.tar.gz *.zip SHA256SUMS

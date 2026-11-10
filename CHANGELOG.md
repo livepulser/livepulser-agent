@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The copyright holder in LICENSE is now "LivePulser contributors". The license is still MIT.
+
 ## [0.2.1] - 2026-10-15
 
 ### Fixed

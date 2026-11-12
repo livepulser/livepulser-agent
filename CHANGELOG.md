@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-13
+
+### Added
+
+- One-line installers published with every release. On Linux and macOS, `install.sh` downloads the archive for the machine, checks it against `SHA256SUMS`, creates the service account, writes the configuration and key, runs `--check` with the new binary, and only then installs and starts the service. On Windows, `install.ps1` downloads and verifies the zip and runs its installer. Both ask for the API key instead of taking it on the command line, and running them again upgrades the agent.
+- `install.sh` installs libcurl with the system package manager when it is missing.
+
+### Changed
+
+- The Windows `install.ps1` keeps the current API key when Enter is pressed at the prompt (same monitor only), and points an existing configuration at the given `-MonitorId`. Before, an existing `agent.conf` kept its old monitor ID.
+- Prereleases (tags such as `v1.2.0-rc.1`) are published as GitHub prereleases, so `releases/latest` always points at a stable release.
+
 ## [1.0.0] - 2026-11-10
 
 First public release.

@@ -9,6 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: ShellCheck the installer
+        run: shellcheck -s sh packaging/install.sh packaging/macos/install.sh packaging/macos/uninstall.sh
+      - name: Parse the PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem packaging/windows/*.ps1) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            foreach ($e in $errors) { Write-Host "::error file=$($f.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
   linux:
     strategy:
       fail-fast: false

@@ -91,10 +91,14 @@ The agent runs in the foreground. Under any supervisor:
 
 ## Upgrading
 
+Run the [quick install](../README.md#quick-install) command again. It keeps the configuration, and pressing Enter at the key prompt keeps the current key. The new binary is checked with `--check` before it replaces the old one.
+
+For a manual or source install:
+
 | Platform | Steps |
 | --- | --- |
 | Linux | `make && sudo make install && sudo systemctl restart livepulser-agent` |
-| macOS | Run `install.sh` with the new binary, then `sudo launchctl kickstart -k system/com.livepulser.agent` |
+| macOS | Run `install.sh` from the archive with the new binary, then `sudo launchctl kickstart -k system/com.livepulser.agent` |
 | Windows | Run `install.ps1` again from the new release. It stops the service, replaces the binary and starts it again |
 
 The session and sequence reservation survive the upgrade.

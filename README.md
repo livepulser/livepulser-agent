@@ -48,7 +48,29 @@ The agent measures the host it runs on. Running it inside a container is not sup
 
 ## Install
 
-Every platform starts the same way. Create a resource monitor in the LivePulser dashboard, then copy its **monitor ID** and **API key**. The key is shown only once.
+Create a resource monitor in the LivePulser dashboard, then copy its **monitor ID** and **API key**. The key is shown only once. The dashboard shows these commands with the monitor ID filled in.
+
+### Quick install
+
+Linux (systemd, amd64 or arm64) and macOS 11 or later:
+
+```sh
+curl -fsSL https://github.com/livepulser/livepulser-agent/releases/latest/download/install.sh | sudo sh -s -- --monitor-id <monitor-id>
+```
+
+Windows 10 / Server 2016 or later, from an elevated PowerShell prompt:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/livepulser/livepulser-agent/releases/latest/download/install.ps1))) -MonitorId <monitor-id>
+```
+
+The installer asks for the API key, so it never appears in the command line or the shell history. It downloads the release for the machine and checks it against `SHA256SUMS`. It sets up the service account, configuration and key, and verifies them with `--check` before it installs or starts anything. If any step fails, an existing installation is left as it was.
+
+Run the same command again to upgrade, and press Enter at the key prompt to keep the current key. For an unattended install on Linux or macOS, pass `--api-key-file PATH` instead of typing the key.
+
+To read the installer before running it, download it first (`curl -fsSLO …/install.sh`). Each release lists its checksum in `SHA256SUMS`.
+
+## Manual install
 
 ### Linux
 

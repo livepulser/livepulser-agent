@@ -21,7 +21,9 @@ concurrency:
 jobs:
   publish:
     if: github.repository == 'livepulser/livepulser-agent-dev'
-    runs-on: ubuntu-24.04
+    # TEMPORARY (November 2026): CI_RUNNER points at the self-hosted build VM while the
+    # free Actions minutes are used up. Delete the variable on 2026-12-01.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-24.04"') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,12 +45,15 @@ jobs:
             echo "::error::PUBLIC_REPO_DEPLOY_KEY is not set"
             exit 1
           fi
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/public_repo
-          chmod 600 ~/.ssh/public_repo
+          # The key and host key live in the job's temp directory and are removed when
+          # the step ends, so a self-hosted runner keeps nothing in its home directory.
+          dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/publish.XXXXXX")
+          trap 'rm -rf "$dir"' EXIT
+          (umask 077 && printf '%s\n' "$DEPLOY_KEY" > "$dir/key")
           # GitHub's published SSH host key (docs.github.com, "GitHub's SSH key fingerprints").
-          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/public_repo -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $dir/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$dir/known_hosts"
+          git remote remove public 2>/dev/null || true
           git remote add public git@github.com:livepulser/livepulser-agent.git
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             git push public "refs/tags/$GITHUB_REF_NAME"

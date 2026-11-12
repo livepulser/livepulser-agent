@@ -8,9 +8,16 @@ on:
 permissions:
   contents: read
 
+# Runners: GitHub-hosted, unless the CI_RUNNER variable (a JSON label list) is set.
+# TEMPORARY (November 2026, while the free Actions minutes are used up): set to
+# ["self-hosted","builder"], a local Linux build VM. Then the Linux, lint and Windows
+# cross-compile jobs run there, and the arm64, Ubuntu 22.04, macOS and Windows test
+# jobs are skipped; the public Release workflow still runs them for every tag. Delete
+# the variable on 2026-12-01 to go back to the full GitHub-hosted matrix.
+
 jobs:
   scripts:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-24.04"') }}
     steps:
       - uses: actions/checkout@v5
       - name: ShellCheck the installer
@@ -30,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-22.04]
+        runner: ${{ fromJSON(vars.CI_RUNNER && format('[{0}]', vars.CI_RUNNER) || '["ubuntu-24.04","ubuntu-24.04-arm","ubuntu-22.04"]') }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -41,6 +48,7 @@ jobs:
       - run: ls -l build/livepulser-agent && ldd build/livepulser-agent
 
   macos:
+    if: vars.CI_RUNNER == ''
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +61,7 @@ jobs:
       - run: ls -l build/livepulser-agent && otool -L build/livepulser-agent
 
   windows-build:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-24.04"') }}
     steps:
       - uses: actions/checkout@v5
       - name: Install MinGW-w64
@@ -61,12 +69,14 @@ jobs:
       - name: Cross-compile
         run: make CC=x86_64-w64-mingw32-gcc all build/unit-tests.exe build/livepulser-agent-testing.exe
       - uses: actions/upload-artifact@v4
+        if: vars.CI_RUNNER == ''
         with:
           name: windows-binaries
           path: build/*.exe
 
   windows-test:
     needs: windows-build
+    if: vars.CI_RUNNER == ''
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5

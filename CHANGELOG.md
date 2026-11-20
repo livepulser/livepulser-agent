@@ -5,6 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-20
+
+### Fixed
+
+- Changing only the upload interval in the dashboard no longer stops interval uploads. Before, the agent kept sampling but only uploaded on threshold breaches and recoveries, so the monitor showed as offline in between. Restarting the agent also cleared it.
+
 ## [1.1.0] - 2026-11-13
 
 ### Added
@@ -42,5 +48,7 @@ First public release.
 - Release archives for Linux (amd64, arm64), macOS (universal) and Windows (amd64), with a `SHA256SUMS` file.
 - Unit tests with procfs fixtures, and an integration test against a local fake API, run under AddressSanitizer and UndefinedBehaviorSanitizer where available. CI covers Linux (amd64, arm64), macOS (arm64, x86_64) and Windows.
 
-[Unreleased]: https://github.com/livepulser/livepulser-agent/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/livepulser/livepulser-agent/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/livepulser/livepulser-agent/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/livepulser/livepulser-agent/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/livepulser/livepulser-agent/releases/tag/v1.0.0

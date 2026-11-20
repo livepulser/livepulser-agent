@@ -34,6 +34,7 @@ class Api:
         self.schema = 2
         # Real CPU on busy CI hosts can exceed lower thresholds; tests change it explicitly.
         self.cpu_threshold = 100
+        self.interval = INTERVAL
         self.key = KEY
         self.forced = []
         self.log = []
@@ -47,11 +48,11 @@ class Api:
     def config(self):
         body = json.dumps({
             "schema_version": self.schema, "config_version": self.version,
-            "report_interval_seconds": INTERVAL, "sample_seconds": SAMPLE,
+            "report_interval_seconds": self.interval, "sample_seconds": SAMPLE,
             "settings": {"cpu": self.cpu_threshold, "disk_path": "/", "network_interface": IFACE},
             "thresholds": {"cpu_percent": self.cpu_threshold},
             "rules": {"breach_seconds": 2, "recovery_seconds": 2, "recovery_margin": 0},
-            "offline_after_seconds": INTERVAL * 3 + 30, "active": self.active,
+            "offline_after_seconds": self.interval * 3 + 30, "active": self.active,
         }).encode()
         return body, '"%s"' % hashlib.sha256(body).hexdigest()
 
@@ -343,6 +344,20 @@ def main():
     wait_for(lambda: accepted()[-1]["body"]["config_version"] == API.version, 10, "uploads with the new version")
     assert not API.requests("telemetry", 409)
     print("ok   LP-Config-Version on upload responses triggers a config refresh")
+
+    # Only the upload interval changes: the sample window stays open, and interval
+    # uploads must carry on at the new cadence (1.1.0 stopped them for good).
+    API.bump(interval=3)
+    wait_for(lambda: accepted()[-1]["body"]["config_version"] == API.version, 10, "uploads with the new interval")
+    changed = time.monotonic()
+    wait_for(lambda: len([r for r in uploads("interval") if r["time"] > changed]) >= 2, 15,
+             "interval uploads after an interval-only change")
+    API.bump(interval=INTERVAL)
+    wait_for(lambda: accepted()[-1]["body"]["config_version"] == API.version, 10, "uploads with the interval restored")
+    changed = time.monotonic()
+    wait_for(lambda: len([r for r in uploads("interval") if r["time"] > changed]) >= 2, 15,
+             "interval uploads after the interval is restored")
+    print("ok   changing only the upload interval keeps interval uploads going")
 
     API.bump(cpu_threshold=0)
     wait_for(lambda: uploads("breach"), 15, "an immediate breach upload")

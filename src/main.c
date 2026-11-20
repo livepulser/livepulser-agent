@@ -325,9 +325,19 @@ static void open_window(struct agent *a)
 	lp_collect_counters(&a->collector, &a->baseline);
 	a->window_open = true;
 	a->window_end_ms = a->baseline.clock.mono_ms + lp_window_length_ms(a->cfg.sample_s);
-	/* Upload just after a sample boundary so each batch includes the sample that just ended. */
-	if (!a->next_upload_ms)
-		a->next_upload_ms = a->baseline.clock.mono_ms + (int64_t)a->cfg.interval_s * 1000 + 200;
+}
+
+/*
+ * Schedules the next interval upload one interval after the current window began, just
+ * after a sample boundary so each batch includes the sample that just ended. Called
+ * whenever no upload is scheduled, not only when a window opens: a new upload interval
+ * alone keeps the window open, and must not leave interval uploads unscheduled.
+ */
+static void schedule_upload(struct agent *a)
+{
+	int64_t window_start = a->window_end_ms - lp_window_length_ms(a->cfg.sample_s);
+
+	a->next_upload_ms = window_start + (int64_t)a->cfg.interval_s * 1000 + 200;
 }
 
 static void close_window(struct agent *a)
@@ -416,6 +426,8 @@ static int run(struct agent *a)
 				open_window(a);
 				continue;
 			}
+			if (!a->next_upload_ms)
+				schedule_upload(a);
 			if (now >= a->window_end_ms) {
 				close_window(a);
 				continue;
@@ -427,7 +439,7 @@ static int run(struct agent *a)
 				upload(a, "interval");
 				continue;
 			}
-			wake = min64(wake, a->next_upload_ms ? min64(a->window_end_ms, a->next_upload_ms) : a->window_end_ms);
+			wake = min64(wake, min64(a->window_end_ms, a->next_upload_ms));
 		}
 		lp_wait_until(wake);
 	}

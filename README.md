@@ -78,8 +78,8 @@ Download the archive for your architecture from the [releases page](https://gith
 
 ```sh
 sudo apt install libcurl4 ca-certificates          # or: dnf install libcurl ca-certificates
-tar -xzf livepulser-agent-1.0.0-linux-amd64.tar.gz
-cd livepulser-agent-1.0.0-linux-amd64
+tar -xzf livepulser-agent-1.1.2-linux-amd64.tar.gz
+cd livepulser-agent-1.1.2-linux-amd64
 sudo install -m 0755 livepulser-agent /usr/local/bin/livepulser-agent
 sudo install -d -m 0750 /etc/livepulser-agent
 sudo install -m 0640 agent.conf.example /etc/livepulser-agent/agent.conf

@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Runners: GitHub-hosted, unless the CI_RUNNER variable (a JSON label list) is set.
+# TEMPORARY (November 2026, while the free Actions minutes are used up): set to
+# ["self-hosted","builder"], a local Linux build VM. Then the Linux, lint and Windows
+# cross-compile jobs run there, and the arm64, Ubuntu 22.04, macOS and Windows test
+# jobs are skipped; the public Release workflow still runs them for every tag. Delete
+# the variable on 2026-12-01 to go back to the full GitHub-hosted matrix.
+
+jobs:
+  scripts:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-24.04"') }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: ShellCheck the installer
+        run: shellcheck -s sh packaging/install.sh packaging/macos/install.sh packaging/macos/uninstall.sh packaging/linux/build-release.sh packaging/linux/smoke.sh
+      - name: Parse the PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem packaging/windows/*.ps1) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            foreach ($e in $errors) { Write-Host "::error file=$($f.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.CI_RUNNER && format('[{0}]', vars.CI_RUNNER) || '["ubuntu-24.04","ubuntu-24.04-arm","ubuntu-22.04"]') }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev
+      - run: make
+      - run: make test
+      - run: ls -l build/livepulser-agent && ldd build/livepulser-agent
+
+  macos:
+    if: vars.CI_RUNNER == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: make
+      - run: make test
+      - run: ls -l build/livepulser-agent && otool -L build/livepulser-agent
+
+  windows-build:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-24.04"') }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Cross-compile
+        run: make CC=x86_64-w64-mingw32-gcc all build/unit-tests.exe build/livepulser-agent-testing.exe
+      - uses: actions/upload-artifact@v4
+        if: vars.CI_RUNNER == ''
+        with:
+          name: windows-binaries
+          path: build/*.exe
+
+  windows-test:
+    needs: windows-build
+    if: vars.CI_RUNNER == ''
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: build
+      - name: Unit tests
+        working-directory: tests
+        run: ..\build\unit-tests.exe
+      - name: Integration tests
+        run: python tests/integration/run.py build/livepulser-agent-testing.exe
+      - name: Version
+        run: build\livepulser-agent.exe --version

@@ -1,0 +1,88 @@
+name: Publish
+
+# Development happens in a private repository. This publishes released code to the
+# public one: main each time it moves, and v* tags, which start the public
+# repository's Release workflow. The private history is never copied: each publish is
+# one new commit by livepulser[bot] holding the released files, on top of the public
+# main (the first one starts an empty repository), so nothing but that bot appears in
+# the public history. Pushes are fast-forward only. The job runs only in the
+# development repository; the copy of this file in the public repository does nothing.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'livepulser/livepulser-agent-dev'
+    # TEMPORARY (November 2026): CI_RUNNER points at the self-hosted build VM while the
+    # free Actions minutes are used up. Delete the variable on 2026-12-01.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-24.04"') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push to the public repository
+        env:
+          DEPLOY_KEY: ${{ secrets.PUBLIC_REPO_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          # Notes for the development repository live on its never-merged internal
+          # branch. If any of them reach a published commit, stop.
+          if git ls-tree -r --name-only "$GITHUB_SHA" | grep -q '^internal/'; then
+            echo "::error::$GITHUB_SHA contains internal/, which must never be published"
+            exit 1
+          fi
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::PUBLIC_REPO_DEPLOY_KEY is not set"
+            exit 1
+          fi
+          # The key and host key live in the job's temp directory and are removed when
+          # the step ends, so a self-hosted runner keeps nothing in its home directory.
+          dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/publish.XXXXXX")
+          trap 'rm -rf "$dir"' EXIT
+          (umask 077 && printf '%s\n' "$DEPLOY_KEY" > "$dir/key")
+          # GitHub's published SSH host key (docs.github.com, "GitHub's SSH key fingerprints").
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $dir/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$dir/known_hosts"
+          git remote remove public 2>/dev/null || true
+          git remote add public git@github.com:livepulser/livepulser-agent.git
+
+          # The public main, if the repository has one yet.
+          base=""
+          if git fetch -q public refs/heads/main:refs/remotes/public/main 2>/dev/null; then
+            base=$(git rev-parse refs/remotes/public/main)
+          fi
+          export GIT_AUTHOR_NAME='livepulser[bot]' GIT_COMMITTER_NAME='livepulser[bot]'
+          export GIT_AUTHOR_EMAIL='354840261+livepulser[bot]@users.noreply.github.com'
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          tree=$(git rev-parse "$GITHUB_SHA^{tree}")
+          if [ -z "$base" ]; then
+            commit=$(printf 'livepulser-agent\n' | git commit-tree "$tree")
+          elif [ "$(git rev-parse "$base^{tree}")" = "$tree" ]; then
+            commit=$base
+          else
+            commit=$(git log -1 --format=%B "$GITHUB_SHA" | git commit-tree "$tree" -p "$base")
+          fi
+          # A tag on the current main moves the public main too; a tag on an older
+          # commit only gets its tag (main never goes back).
+          refs="$commit:refs/heads/main"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            refs="$commit:refs/tags/$GITHUB_REF_NAME"
+            if [ "$(git rev-parse "$GITHUB_SHA^{commit}")" = "$(git rev-parse refs/remotes/origin/main)" ]; then
+              refs="$commit:refs/heads/main $refs"
+            fi
+          fi
+          echo "publishing tree $tree as $commit"
+          # shellcheck disable=SC2086
+          git push public $refs

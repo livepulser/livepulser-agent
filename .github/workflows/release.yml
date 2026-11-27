@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: ShellCheck the installer
+        run: shellcheck -s sh packaging/install.sh packaging/macos/install.sh packaging/macos/uninstall.sh packaging/linux/build-release.sh packaging/linux/smoke.sh
+      - name: Parse the PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem packaging/windows/*.ps1) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            foreach ($e in $errors) { Write-Host "::error file=$($f.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev
+      - run: make test
+      # The release binary is built on AlmaLinux 8 (glibc 2.28), so it runs on every
+      # distribution with glibc 2.28 or later.
+      - name: Package (built on AlmaLinux 8)
+        run: docker run --rm -v "$PWD:/src" -w /src almalinux:8 sh packaging/linux/build-release.sh "${GITHUB_REF_NAME#v}" "${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  # Starts the release binary on each supported distribution before anything is published.
+  # (Debian 11 is left out: its archive no longer serves libcurl4.)
+  linux-smoke:
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        image:
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:12
+          - almalinux:8
+          - registry.access.redhat.com/ubi9/ubi
+          - amazonlinux:2023
+          - fedora:latest
+          - opensuse/leap:15.6
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist
+      - name: Start it on ${{ matrix.image }}
+        run: |
+          tar -C dist -xzf dist/*.tar.gz
+          docker run --rm -v "$PWD:/src:ro" -w /src "${{ matrix.image }}" sh packaging/linux/smoke.sh dist/livepulser-agent-*-linux-${{ matrix.arch }}/livepulser-agent
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - run: make test
+      - name: Package universal binary
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make clean && make VERSION="$version" ARCHFLAGS="-arch arm64 -arch x86_64"
+          name="livepulser-agent-${version}-macos-universal"
+          mkdir -p "dist/$name"
+          strip -o "dist/$name/livepulser-agent" build/livepulser-agent
+          # Apple silicon only runs signed code; stripping drops the linker's ad-hoc signature.
+          codesign --force --sign - "dist/$name/livepulser-agent"
+          cp README.md CHANGELOG.md LICENSE packaging/agent.conf.example "dist/$name/"
+          cp packaging/macos/com.livepulser.agent.plist packaging/macos/install.sh packaging/macos/uninstall.sh "dist/$name/"
+          cp third_party/cjson/LICENSE "dist/$name/LICENSE.cjson"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.tar.gz
+
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 zip
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make CC=x86_64-w64-mingw32-gcc VERSION="$version"
+          name="livepulser-agent-${version}-windows-amd64"
+          mkdir -p "dist/$name"
+          x86_64-w64-mingw32-strip -o "dist/$name/livepulser-agent.exe" build/livepulser-agent.exe
+          cp README.md CHANGELOG.md LICENSE packaging/agent.conf.example packaging/windows/install.ps1 packaging/windows/uninstall.ps1 "dist/$name/"
+          cp third_party/cjson/LICENSE "dist/$name/LICENSE.cjson"
+          (cd dist && zip -qr "$name.zip" "$name")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: dist/*.zip
+
+  publish:
+    needs: [scripts, linux, linux-smoke, macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # The one-line installers (releases/latest/download/install.sh and install.ps1)
+      # download the archives of the release they were published with.
+      - name: Render the installers
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed "s/@VERSION@/$version/g" packaging/install.sh > dist/install.sh
+          sed "s/@VERSION@/$version/g" packaging/windows/bootstrap.ps1 > dist/install.ps1
+          ! grep -n '@VERSION@' dist/install.sh dist/install.ps1
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip install.sh install.ps1 > SHA256SUMS
+      # Build provenance: anyone can check that a file came from this workflow with
+      # `gh attestation verify FILE --repo livepulser/livepulser-agent`.
+      - name: Attest the release files
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/install.sh
+            dist/install.ps1
+            dist/SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: dist
+        run: |
+          # A tag with a suffix (v1.2.0-rc.1) is a prerelease, which never becomes "latest".
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" $prerelease \
+            --notes "See CHANGELOG.md for details." *.tar.gz *.zip install.sh install.ps1 SHA256SUMS

@@ -1,0 +1,11 @@
+# LivePulser resource agent configuration.
+# Everything else (interval, disk path, network interface, thresholds) is managed in the dashboard.
+
+endpoint=https://rs.livepulser.com
+monitor_id=00000000-0000-4000-8000-000000000000
+api_key_file=/etc/livepulser-agent/api-key
+
+# Optional:
+# state_dir=/var/lib/livepulser-agent
+# ca_file=/etc/ssl/certs/ca-certificates.crt
+# proxy=http://proxy.internal:3128
